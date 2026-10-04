@@ -1,0 +1,6 @@
+{
+  "name": "بوت متجر الاشتراكات الذكي | GoPro Store Bot",
+  "description": "نظام وتيليجرام بوت متجر الاشتراكات والذكاء الاصطناعي مع هيكلية المنتجات، الأسعار الثلاثية، نظام الكوبونات، ولوحة تحكم متقدمة للأدمن.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

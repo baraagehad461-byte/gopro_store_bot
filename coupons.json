@@ -1,0 +1,69 @@
+{
+  "WELCOME20": {
+    "code": "WELCOME20",
+    "influencer": "كوبون الترحيب العام",
+    "discount_type": "fixed",
+    "fixed_discount": 20,
+    "package_discounts": {},
+    "max_uses": 200,
+    "used_count": 2,
+    "active": true,
+    "created_at": "2026-10-04T10:00:00",
+    "usage_history": [
+      {
+        "order_ref": "ORD-9421",
+        "user_id": 1049281,
+        "username": "ahmed_dev",
+        "customer_name": "أحمد علي",
+        "product_name": "شات جي بي تي (ChatGPT)",
+        "package_name": "حساب مشترك (Plus)",
+        "original_amount": "300ج",
+        "discount_amount": "20ج",
+        "final_amount": "280ج",
+        "date": "2026-10-04 12:15"
+      },
+      {
+        "order_ref": "ORD-8812",
+        "user_id": 2094817,
+        "username": "sarah_ai",
+        "customer_name": "سارة محمد",
+        "product_name": "كاب كات (CapCut Pro)",
+        "package_name": "شهر واحد (28 يوم ضمان)",
+        "original_amount": "200ج",
+        "discount_amount": "20ج",
+        "final_amount": "180ج",
+        "date": "2026-10-04 14:30"
+      }
+    ]
+  },
+  "PRO50": {
+    "code": "PRO50",
+    "influencer": "قناة التقنية للمحترفين",
+    "discount_type": "package_specific",
+    "fixed_discount": 25,
+    "package_discounts": {
+      "plus_warranty": 100,
+      "plus_no_warranty": 50,
+      "capcut_6m": 70,
+      "canva_panel": 80
+    },
+    "max_uses": 100,
+    "used_count": 1,
+    "active": true,
+    "created_at": "2026-10-04T10:00:00",
+    "usage_history": [
+      {
+        "order_ref": "ORD-7612",
+        "user_id": 4892182,
+        "username": "omar_tech",
+        "customer_name": "عمر المحترف",
+        "product_name": "شات جي بي تي (ChatGPT)",
+        "package_name": "حساب خاص بضمان 28 يوم (Plus)",
+        "original_amount": "1200ج",
+        "discount_amount": "100ج",
+        "final_amount": "1100ج",
+        "date": "2026-10-04 15:45"
+      }
+    ]
+  }
+}

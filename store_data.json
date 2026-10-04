@@ -1,0 +1,306 @@
+{
+  "chatgpt": {
+    "name": "🤖 شات جي بي تي (ChatGPT)",
+    "available": true,
+    "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
+    "description": "🤖 حسابات واشتراكات شات جي بي تي الرسمية بمختلف الباقات:\n- حسابات Plus (مشترك، خاص، بضمان وبدون ضمان)\n- حسابات Business دورية مع تجديد شهري وتفعيل فوري.",
+    "subcategories": [
+      {
+        "id": "chatgpt_plus",
+        "name": "⚡️ باقات ChatGPT Plus",
+        "description": "حسابات Plus الذكية بموديلات GPT-4o والسرعة القصوى ومولد الصور DALL-E."
+      },
+      {
+        "id": "chatgpt_business",
+        "name": "🔄 باقات ChatGPT Business",
+        "description": "حسابات بزنس احترافية مع أمان تام وتجديد دوري وميزات الفرق."
+      }
+    ],
+    "packages": [
+      {
+        "id": "plus_shared",
+        "subcategory": "chatgpt_plus",
+        "label": "حساب مشترك (Plus)",
+        "retail_price": "300ج",
+        "reseller_price": "250ج",
+        "friend_price": "220ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
+        "desc": "▫️ حساب ChatGPT Plus مشترك بجودة عالية وسرعة فائقة."
+      },
+      {
+        "id": "plus_no_warranty",
+        "subcategory": "chatgpt_plus",
+        "label": "حساب خاص بدون ضمان (Plus)",
+        "retail_price": "600ج",
+        "reseller_price": "550ج",
+        "friend_price": "500ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
+        "desc": "▫️ حساب ChatGPT Plus خاص بك بمفردك بدون ضمان بعد التسليم."
+      },
+      {
+        "id": "plus_warranty",
+        "subcategory": "chatgpt_plus",
+        "label": "حساب خاص بضمان 28 يوم (Plus)",
+        "retail_price": "1200ج",
+        "reseller_price": "1150ج",
+        "friend_price": "1100ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
+        "desc": "▫️ حساب خاص وتفعيل على حسابك الشخصي مع ضمان كامل لمدة 28 يوماً."
+      },
+      {
+        "id": "biz_remaining",
+        "subcategory": "chatgpt_business",
+        "label": "الأيام المتبقية حتى 23 في الشهر",
+        "retail_price": "650ج",
+        "reseller_price": "580ج",
+        "friend_price": "550ج",
+        "requires_email": true,
+        "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
+        "desc": "▫️ ChatGPT Business للأيام المتبقية في الدورة الحالية (حتى يوم 23 من الشهر)."
+      },
+      {
+        "id": "biz_1m_plus",
+        "subcategory": "chatgpt_business",
+        "label": "شهر + الأيام المتبقية",
+        "retail_price": "1500ج",
+        "reseller_price": "1400ج",
+        "friend_price": "1350ج",
+        "requires_email": true,
+        "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
+        "desc": "▫️ اشتراك Business لمدة شهر كامل مضافاً إليه الأيام المتبقية حتى دورة 23."
+      },
+      {
+        "id": "biz_2m_plus",
+        "subcategory": "chatgpt_business",
+        "label": "شهرين + الأيام المتبقية",
+        "retail_price": "2100ج",
+        "reseller_price": "1950ج",
+        "friend_price": "1900ج",
+        "requires_email": true,
+        "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
+        "desc": "▫️ اشتراك Business لمدة شهرين + الأيام المتبقية."
+      },
+      {
+        "id": "biz_3m",
+        "subcategory": "chatgpt_business",
+        "label": "3 شهور Business",
+        "retail_price": "2700ج",
+        "reseller_price": "2500ج",
+        "friend_price": "2450ج",
+        "requires_email": true,
+        "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
+        "desc": "▫️ اشتراك Business لمدة 3 شهور متواصلة وتفعيل على إيميلك."
+      },
+      {
+        "id": "biz_6m",
+        "subcategory": "chatgpt_business",
+        "label": "6 شهور Business",
+        "retail_price": "5000ج",
+        "reseller_price": "4700ج",
+        "friend_price": "4600ج",
+        "requires_email": true,
+        "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
+        "desc": "▫️ اشتراك Business نصف سنوي بأفضل سعر وتفعيل مباشر."
+      }
+    ]
+  },
+  "capcut": {
+    "name": "🎬 كاب كات (CapCut Pro)",
+    "available": true,
+    "photo": "https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?w=800&auto=format&fit=crop&q=80",
+    "description": "🎬 اشتراكات CapCut Pro لمحرري الفيديو وصناع المحتوى:\nتصدير بدون علامة مائية، جودة 4K، انتقالات وتأثيرات حصرية، ميزات الذكاء الاصطناعي والترجمة التلقائية.",
+    "packages": [
+      {
+        "id": "capcut_1m",
+        "label": "شهر واحد (28 يوم ضمان)",
+        "retail_price": "200ج",
+        "reseller_price": "140ج",
+        "friend_price": "120ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?w=800&auto=format&fit=crop&q=80",
+        "desc": "🛡 الضمان: 28 يوم | يعمل على جهاز واحد فقط بدون علامة مائية وتصدير بجودة عالية."
+      },
+      {
+        "id": "capcut_1600",
+        "label": "شهر + 1600 كريديتس AI",
+        "retail_price": "250ج",
+        "reseller_price": "160ج",
+        "friend_price": "140ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?w=800&auto=format&fit=crop&q=80",
+        "desc": "🛡 الضمان: 28 يوم | يحتوي على 1600 كريدتس إضافية لأدوات الذكاء الاصطناعي وتفريغ الصوت."
+      },
+      {
+        "id": "capcut_6m",
+        "label": "6 شهور (5 شهور ضمان)",
+        "retail_price": "850ج",
+        "reseller_price": "700ج",
+        "friend_price": "650ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?w=800&auto=format&fit=crop&q=80",
+        "desc": "🛡 الضمان: 5 شهور | وصول كامل لأدوات المونتاج البرو الاحترافية لمدة نصف سنة."
+      }
+    ]
+  },
+  "canva": {
+    "name": "🎨 كانفا (Canva)",
+    "available": true,
+    "photo": "https://images.unsplash.com/photo-1626785774573-4b799315345d?w=800&auto=format&fit=crop&q=80",
+    "description": "🎨 اشتراكات منصة كانفا للتصميم الجرافيكي وصناعة المحتوى:\nقوالب غير محدودة، إزالة الخلفيات بنقرة واحدة، خطوط ومكتبات وسائط احترافية.",
+    "packages": [
+      {
+        "id": "canva_pro",
+        "label": "Canva Pro سنتين (دعوة إيميل)",
+        "retail_price": "60ج",
+        "reseller_price": "15ج",
+        "friend_price": "10ج",
+        "requires_email": true,
+        "photo": "https://images.unsplash.com/photo-1626785774573-4b799315345d?w=800&auto=format&fit=crop&q=80",
+        "desc": "⏳ المدة: سنتين | تفعيل رسمي على بريدك الشخصي بدعوة فريق."
+      },
+      {
+        "id": "canva_panel",
+        "label": "Canva Panel 500 (3 سنوات Admin)",
+        "retail_price": "900ج",
+        "reseller_price": "600ج",
+        "friend_price": "550ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1626785774573-4b799315345d?w=800&auto=format&fit=crop&q=80",
+        "desc": "🛡 الضمان: شهرين | لوحة تحكم كاملة 500 عضو لمدة 3 سنوات مع تحكم كامل بالإيميل."
+      }
+    ]
+  },
+  "gemini": {
+    "name": "♊️ جيميناي (Google Gemini)",
+    "available": true,
+    "photo": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80",
+    "description": "♊️ خدمات الذكاء الاصطناعي من جوجل:\nالوصول لموديلات Gemini Ultra و Advanced مع مساحة سحابية وميزات توليد الصور والبرمجة.",
+    "packages": [
+      {
+        "id": "gemini_18m",
+        "label": "Gemini 18M (24HW) رابط فوري",
+        "retail_price": "250ج",
+        "reseller_price": "80ج",
+        "friend_price": "70ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80",
+        "desc": "رابط تفعيل ذاتي بيشتغل على أي جيميل جديد أو قديم، 1000 Flow Credits وموديلات نانو بنانا برو."
+      },
+      {
+        "id": "gemini_invite",
+        "label": "Gemini بدعوة على الإيميل",
+        "retail_price": "100ج",
+        "reseller_price": "25ج",
+        "friend_price": "20ج",
+        "requires_email": true,
+        "photo": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80",
+        "desc": "📌 اشتراك جيميناي بدعوة مباشرة على بريدك الإلكتروني وتفعيل يدوي سريع بعد الدفع."
+      }
+    ]
+  },
+  "adobe": {
+    "name": "🔴 أدوبي (Adobe CC)",
+    "available": true,
+    "photo": "https://images.unsplash.com/photo-1581291518857-4e27b48ff24e?w=800&auto=format&fit=crop&q=80",
+    "description": "🔴 باقة أدوبي الإبداعية المتكاملة (Photoshop, Illustrator, Premiere, After Effects, etc.):\nجميع البرامج الأصلية مع 4000 رصيد Firefly شهرياً وتخزين سحابي.",
+    "packages": [
+      {
+        "id": "adobe_cc",
+        "label": "Adobe CC 4 شهور (جهازين)",
+        "retail_price": "1650ج",
+        "reseller_price": "1500ج",
+        "friend_price": "1400ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1581291518857-4e27b48ff24e?w=800&auto=format&fit=crop&q=80",
+        "desc": "🛡 الضمان: 4 شهور | يعمل على جهازين في نفس الوقت ووصول لكافة برامج أدوبي الرسمية."
+      }
+    ]
+  },
+  "claude": {
+    "name": "⚡️ كلود (Claude AI)",
+    "available": true,
+    "photo": "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80",
+    "description": "⚡️ أفضل نموذج ذكاء اصطناعي للتحليل والبرمجة والكتابة الإبداعية من Anthropic بموديلات Claude 3.5 Sonnet و Opus.",
+    "packages": [
+      {
+        "id": "claude_api_100",
+        "label": "Claude API 100$ (30 يوم)",
+        "retail_price": "450ج",
+        "reseller_price": "375ج",
+        "friend_price": "350ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80",
+        "desc": "100 دولار رصيد API كلود لمدة 30 يوم مع ضمان كامل."
+      },
+      {
+        "id": "claude_api_500",
+        "label": "Claude API 500$ (30 يوم)",
+        "retail_price": "950ج",
+        "reseller_price": "850ج",
+        "friend_price": "800ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80",
+        "desc": "500 دولار رصيد API كلود لمدة 30 يوم مع ضمان كامل."
+      },
+      {
+        "id": "claude_pro",
+        "label": "Claude Pro رسمي",
+        "retail_price": "1200ج",
+        "reseller_price": "1150ج",
+        "friend_price": "1100ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80",
+        "desc": "اشتراك كلود برو رسمي على حسابك بأعلى سرعة وحدود استخدام."
+      },
+      {
+        "id": "claude_max",
+        "label": "Claude Max 5x",
+        "retail_price": "5000ج",
+        "reseller_price": "4900ج",
+        "friend_price": "4800ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80",
+        "desc": "اشتراك ماكس 5x كلود للمطورين والشركات مع أعلى سعة استيعابية."
+      }
+    ]
+  },
+  "youtube": {
+    "name": "📺 يوتيوب بريميوم (YouTube Premium)",
+    "available": true,
+    "photo": "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&auto=format&fit=crop&q=80",
+    "description": "📺 يوتيوب بدون إعلانات مع تشغيل في الخلفية وتنزيل الفيديوهات واشتراك YouTube Music مجاناً.",
+    "packages": [
+      {
+        "id": "youtube_prem",
+        "label": "YouTube Premium 3 شهور (Gift Link)",
+        "retail_price": "250ج",
+        "reseller_price": "170ج",
+        "friend_price": "150ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&auto=format&fit=crop&q=80",
+        "desc": "رابط Gift Link رسمي لمدة 3 شهور مع ضمان 60 يوم."
+      }
+    ]
+  },
+  "lovable": {
+    "name": "💜 لوفابل (Lovable AI)",
+    "available": true,
+    "photo": "https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&auto=format&fit=crop&q=80",
+    "description": "💜 منصة تطوير وتصميم تطبيقات الويب بالذكاء الاصطناعي Lovable:",
+    "packages": [
+      {
+        "id": "lovable_lite",
+        "label": "Lovable Lite 12 شهر",
+        "retail_price": "650ج",
+        "reseller_price": "500ج",
+        "friend_price": "450ج",
+        "requires_email": false,
+        "photo": "https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&auto=format&fit=crop&q=80",
+        "desc": "5 كريدتس يومياً + 300 كريدتس إضافية لمرة واحدة لمدة 12 شهر."
+      }
+    ]
+  }
+}
