@@ -422,6 +422,22 @@ def build_coupon_decision_keyboard(request_id):
     markup.add(types.InlineKeyboardButton("❌ إلغاء الطلب", callback_data=f"cancel_order_{request_id}"))
     return markup
 
+def build_coupon_product_selection_keyboard(admin_id):
+    state = admin_action_states.get(admin_id, {})
+    selected = state.get("selected_products", [])
+    store = get_store_data()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for prod_key, prod in store.items():
+        prefix = "✅ " if prod_key in selected else "☐ "
+        markup.add(types.InlineKeyboardButton(
+            f"{prefix}{prod['name']}",
+            callback_data=f"adm_cpn_sel_{prod_key}"
+        ))
+    all_mark = "✅ " if selected == [] else "☐ "
+    markup.add(types.InlineKeyboardButton(f"{all_mark}الكل (جميع المنتجات)", callback_data="adm_cpn_sel_all"))
+    markup.add(types.InlineKeyboardButton("✅ تأكيد وإنشاء الكوبون", callback_data="adm_cpn_confirm"))
+    return markup
+
 # ================= Order Lifecycle & State Management =================
 def save_db_user_state(user_id, state):
     with database_connection() as conn:
@@ -856,6 +872,11 @@ def apply_coupon_to_order(user_id, state, code, chat_id):
     used_count = coupon.get("used_count", 0)
     if used_count >= max_uses:
         bot.send_message(chat_id, "⚠️ تم الوصول للحد الأقصى لاستخدام هذا الكود.\nأرسل كود آخر أو /skip للمتابعة.")
+        return
+
+    applicable_products = coupon.get("applicable_products")
+    if applicable_products and state.get("product_key") not in applicable_products:
+        bot.send_message(chat_id, "⚠️ عذراً، هذا الكوبون غير متاح لهذا المنتج!\nأرسل كود آخر أو /skip للمتابعة.")
         return
 
     # Calculate discount
@@ -1635,9 +1656,15 @@ def handle_adm_view_coupons(call):
     lines = []
     for code, c in coupons.items():
         status = "✅ نشط" if c.get("active", True) else "❌ معطل"
+        applicable = c.get("applicable_products")
+        if applicable:
+            scope = f"📦 {', '.join(applicable)}"
+        else:
+            scope = "📦 جميع المنتجات"
         lines.append(
             f"🎟 <b>{code}</b> ({c.get('influencer', 'بدون')}) - {status}\n"
-            f"   استخدامات: {c.get('used_count', 0)} / {c.get('max_uses', 'غير محدود')} | خصم ثابت: {c.get('fixed_discount', 0)}ج"
+            f"   استخدامات: {c.get('used_count', 0)} / {c.get('max_uses', 'غير محدود')} | خصم ثابت: {c.get('fixed_discount', 0)}ج\n"
+            f"   {scope}"
         )
     coupons_text = "\n\n".join(lines) if lines else "لا توجد كوبونات منشأة حالياً."
 
@@ -1691,6 +1718,96 @@ def handle_adm_confirm_delete_coupon(call):
         update_coupons(coupons)
     bot.answer_callback_query(call.id, f"تم حذف الكوبون {code}")
     handle_adm_view_coupons(call)
+
+# ================= Coupon Product Selection Callbacks =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_sel_all")
+def handle_adm_cpn_select_all(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    state["selected_products"] = []
+    admin_action_states[call.from_user.id] = state
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=build_coupon_product_selection_keyboard(call.from_user.id)
+    )
+    bot.answer_callback_query(call.id, "تم اختيار جميع المنتجات")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cpn_sel_") and c.data != "adm_cpn_sel_all")
+def handle_adm_cpn_toggle_product(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    prod_key = call.data.replace("adm_cpn_sel_", "")
+    selected = state.get("selected_products", [])
+    if prod_key in selected:
+        selected.remove(prod_key)
+    else:
+        selected.append(prod_key)
+    state["selected_products"] = selected
+    admin_action_states[call.from_user.id] = state
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=build_coupon_product_selection_keyboard(call.from_user.id)
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_confirm")
+def handle_adm_cpn_confirm_creation(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    admin_action_states.pop(call.from_user.id, None)
+
+    code = state["code"]
+    influencer = state["influencer"]
+    discount = state["discount"]
+    selected = state.get("selected_products", [])
+    applicable = selected if selected else []
+
+    coupons = get_coupons()
+    coupons[code] = {
+        "code": code,
+        "influencer": influencer,
+        "discount_type": "fixed",
+        "fixed_discount": discount,
+        "package_discounts": {},
+        "max_uses": 500,
+        "used_count": 0,
+        "active": True,
+        "created_at": utc_now(),
+        "usage_history": []
+    }
+    if applicable:
+        coupons[code]["applicable_products"] = applicable
+    update_coupons(coupons)
+
+    if applicable:
+        products_label = ", ".join(applicable)
+        scope_msg = f"📦 المنتجات المحددة: <b>{products_label}</b>"
+    else:
+        scope_msg = "📦 ينطبق على: <b>جميع المنتجات</b>"
+
+    bot.edit_message_text(
+        f"✅ تم إنشاء الكوبون <b>{code}</b> بنجاح!\n"
+        f"🏷 برعاية: <b>{influencer}</b>\n"
+        f"✂️ قيمة الخصم: <b>{discount}ج</b>\n"
+        f"{scope_msg}",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id
+    )
+    bot.answer_callback_query(call.id, "تم إنشاء الكوبون بنجاح!")
 
 # ================= 5.1 Detailed Coupon Statistics & Reports =================
 def send_chunked_messages(chat_id, text, reply_markup=None):
@@ -1753,11 +1870,18 @@ def format_coupon_detailed_report(code, c):
     status_str = "✅ نشط وفعال" if c.get("active", True) else "❌ معطل"
     history_text = "\n\n".join(ops_lines) if ops_lines else "<i>لا توجد عمليات شراء معتمدة ومكتملة بهذا الكوبون حتى الآن.</i>"
 
+    applicable = c.get("applicable_products")
+    if applicable:
+        scope_str = f"📦 <b>المنتجات المحددة:</b> {', '.join(applicable)}\n"
+    else:
+        scope_str = "📦 <b>ينطبق على:</b> جميع المنتجات\n"
+
     report = (
         f"🎟 <b>تقرير الكوبون:</b> <code>{code}</code>\n"
         f"🏷 <b>المؤثر / الجهة:</b> <b>{c.get('influencer', 'عام')}</b>\n"
         f"📌 <b>الحالة:</b> {status_str}\n"
         f"✂️ <b>قيمة الكوبون:</b> {val_str}\n"
+        f"{scope_str}"
         f"📊 <b>إجمالي مرات الاستخدام:</b> {used_count} من {c.get('max_uses', 'غير محدود')}\n"
         f"💰 <b>إجمالي الخصم الممنوح:</b> {format_currency(total_discount)}\n"
         f"💵 <b>إجمالي المبيعات المحققة منه:</b> {format_currency(total_revenue)}\n"
@@ -2153,7 +2277,6 @@ def handle_admin_text_inputs(message):
         return
 
     if action == "create_coupon_step1":
-        admin_action_states.pop(admin_id, None)
         parts = [p.strip() for p in text.split(",")]
         if len(parts) < 3:
             bot.reply_to(message, "⚠️ تنسيق غير صحيح. يرجى إرسال: الكود, اسم المؤثر, قيمة الخصم")
@@ -2167,21 +2290,20 @@ def handle_admin_text_inputs(message):
             bot.reply_to(message, "⚠️ قيمة الخصم يجب أن تكون رقماً.")
             return
 
-        coupons = get_coupons()
-        coupons[code] = {
+        admin_action_states[admin_id] = {
+            "action": "create_coupon_step2",
             "code": code,
             "influencer": influencer,
-            "discount_type": "fixed",
-            "fixed_discount": discount,
-            "package_discounts": {},
-            "max_uses": 500,
-            "used_count": 0,
-            "active": True,
-            "created_at": utc_now(),
-            "usage_history": []
+            "discount": discount,
+            "selected_products": []
         }
-        update_coupons(coupons)
-        bot.reply_to(message, f"✅ تم إنشاء الكوبون <b>{code}</b> بنجاح بقيمة خصم <b>{discount}ج</b> برعاية: <b>{influencer}</b>.")
+        bot.reply_to(
+            message,
+            f"🎟 <b>إنشاء كوبون: {code}</b>\n"
+            f"🏷 المؤثر: <b>{influencer}</b> | الخصم: <b>{discount}ج</b>\n\n"
+            "👇 اختر المنتجات التي ينطبق عليها هذا الكوبون، أو اضغط <b>الكل</b> لجميع المنتجات:",
+            reply_markup=build_coupon_product_selection_keyboard(admin_id)
+        )
         return
 
     if action == "lookup_customer":
