@@ -1432,7 +1432,8 @@ def build_admin_main_keyboard():
         types.InlineKeyboardButton("🔔 مركز وسجل التنبيهات", callback_data="adm_view_notifications")
     )
     markup.add(
-        types.InlineKeyboardButton("📦 حالة توفر المنتجات", callback_data="adm_toggle_products")
+        types.InlineKeyboardButton("📦 حالة توفر المنتجات", callback_data="adm_toggle_products"),
+        types.InlineKeyboardButton("✏️ تعديل وصف المنتجات", callback_data="adm_edit_descriptions")
     )
     return markup
 
@@ -2134,6 +2135,49 @@ def handle_adm_toggle_product_status(call):
     bot.answer_callback_query(call.id, "تم تحديث حالة المنتج")
     handle_adm_toggle_products_view(call)
 
+# 7.1 Product Description Editing
+@bot.callback_query_handler(func=lambda c: c.data == "adm_edit_descriptions")
+def handle_adm_edit_descriptions_view(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    store = get_store_data()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for k, p in store.items():
+        desc_preview = (p.get("description", "")[:40] + "...") if len(p.get("description", "")) > 40 else p.get("description", "بدون وصف")
+        markup.add(types.InlineKeyboardButton(
+            f"✏️ {p['name']}",
+            callback_data=f"adm_edit_desc_{k}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
+    bot.edit_message_text(
+        "✏️ <b>تعديل وصف المنتجات</b>\n\nاختر المنتج الذي ترغب في تعديل وصفه:",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=markup
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_edit_desc_"))
+def handle_adm_edit_desc_prompt(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    prod_key = call.data.replace("adm_edit_desc_", "")
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+    admin_action_states[call.from_user.id] = {"action": "edit_description", "prod_key": prod_key}
+    current_desc = prod.get("description", "بدون وصف")
+    bot.send_message(
+        call.message.chat.id,
+        f"✏️ <b>تعديل وصف المنتج:</b> <b>{prod['name']}</b>\n\n"
+        f"📝 <b>الوصف الحالي:</b>\n{current_desc}\n\n"
+        "أرسل الآن الوصف الجديد للمنتج:\n"
+        "أو أرسل /cancel للإلغاء:"
+    )
+    bot.answer_callback_query(call.id)
+
 # 8. Notifications Center & Test
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_notifications")
 def handle_adm_view_notifications(call):
@@ -2274,6 +2318,26 @@ def handle_admin_text_inputs(message):
 
         tier_names = {"retail_price": "سعر العميل", "reseller_price": "سعر التاجر", "friend_price": "سعر الصديق"}
         bot.reply_to(message, f"✅ تم تحديث <b>{tier_names.get(field)}</b> بنجاح إلى: <b>{clean_price}</b>")
+        return
+
+    if action == "edit_description":
+        prod_key = state["prod_key"]
+        admin_action_states.pop(admin_id, None)
+
+        new_desc = text
+        store = get_store_data()
+        prod = store.get(prod_key)
+        if not prod:
+            bot.reply_to(message, "⚠️ المنتج غير موجود.")
+            return
+
+        prod["description"] = new_desc
+        update_store_data(store)
+        bot.reply_to(
+            message,
+            f"✅ تم تحديث وصف المنتج <b>{prod['name']}</b> بنجاح!\n\n"
+            f"📝 <b>الوصف الجديد:</b>\n{new_desc}"
+        )
         return
 
     if action == "create_coupon_step1":
