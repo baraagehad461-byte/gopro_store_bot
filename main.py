@@ -56,6 +56,47 @@ _coupons_lock = threading.RLock()
 user_states = {}
 admin_action_states = {}
 
+def safe_callback(func):
+    """Decorator that ensures answer_callback_query is always called, preventing infinite spinning."""
+    def wrapper(call):
+        try:
+            func(call)
+        except Exception as e:
+            print(f"Error in callback handler {func.__name__}: {e}")
+            try:
+                bot.answer_callback_query(call.id, "❌ حدث خطأ غير متوقع، يرجى المحاولة لاحقاً.", show_alert=True)
+            except Exception:
+                pass
+    wrapper.__name__ = func.__name__
+    return wrapper
+
+def safe_edit_message_text(call, text, reply_markup=None):
+    """
+    Safely edit a message text, handling:
+    - "message is not modified" errors (ignored silently)
+    - Photo→text transitions (delete old, send new)
+    """
+    try:
+        bot.edit_message_text(
+            text,
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        error_str = str(e).lower()
+        if "message is not modified" in error_str:
+            return  # Content unchanged, ignore silently
+        # Photo→text transition or other edit failure: delete old message, send new
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        try:
+            bot.send_message(call.message.chat.id, text, reply_markup=reply_markup)
+        except Exception as send_err:
+            print(f"Error sending fallback message: {send_err}")
+
 # ================= Database Helpers =================
 @contextmanager
 def database_connection():
@@ -389,6 +430,16 @@ def build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=
         packages = [p for p in packages if p.get("subcategory") == selected_subcat]
 
     for pkg in packages:
+        if not pkg.get("available", True):
+            label = pkg["label"]
+            if prod_key == "chatgpt" and pkg["id"] == "biz_remaining":
+                days, end_date = get_chatgpt_business_info()
+                label = f"الأيام المتبقية ({days} يوم حتى {end_date})"
+            markup.add(types.InlineKeyboardButton(
+                f"🔴 {label} (غير متوفر حالياً)",
+                callback_data=f"pkg_unavailable_{prod_key}_{pkg['id']}"
+            ))
+            continue
         price_info = get_package_price_for_user(pkg, user_id)
         label = pkg["label"]
         if prod_key == "chatgpt" and pkg["id"] == "biz_remaining":
@@ -420,6 +471,22 @@ def build_coupon_decision_keyboard(request_id):
         types.InlineKeyboardButton("⏩ تخطي ومتابعة", callback_data=f"skip_coupon_{request_id}")
     )
     markup.add(types.InlineKeyboardButton("❌ إلغاء الطلب", callback_data=f"cancel_order_{request_id}"))
+    return markup
+
+def build_coupon_product_selection_keyboard(admin_id):
+    state = admin_action_states.get(admin_id, {})
+    selected = state.get("selected_products", [])
+    store = get_store_data()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for prod_key, prod in store.items():
+        prefix = "✅ " if prod_key in selected else "☐ "
+        markup.add(types.InlineKeyboardButton(
+            f"{prefix}{prod['name']}",
+            callback_data=f"adm_cpn_sel_{prod_key}"
+        ))
+    all_mark = "✅ " if selected == [] else "☐ "
+    markup.add(types.InlineKeyboardButton(f"{all_mark}الكل (جميع المنتجات)", callback_data="adm_cpn_sel_all"))
+    markup.add(types.InlineKeyboardButton("✅ تأكيد وإنشاء الكوبون", callback_data="adm_cpn_confirm"))
     return markup
 
 # ================= Order Lifecycle & State Management =================
@@ -545,19 +612,23 @@ def handle_browse_products(message):
 
 @bot.message_handler(func=lambda msg: msg.text == "💬 الدعم الفني")
 def handle_support(message):
-    support_text = (
-        "🛠 <b>مركز المساعدة والدعم الفني | GoPro Store Team</b>\n\n"
-        "فريقنا متواجد دائماً لمساعدتك في الاستفسار أو تفعيل ومتابعة طلباتك:\n\n"
-        f"📱 <b>واتساب:</b> <code>{SUPPORT_WHATSAPP}</code>\n"
-        f"✈️ <b>تيليجرام:</b> {SUPPORT_TELEGRAM}\n"
-        "⏰ مواعيد العمل: متواجدون على مدار 24 ساعة للرد السريع."
-    )
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("💬 مراسلة واتساب", url=f"https://wa.me/2{SUPPORT_WHATSAPP}"),
-        types.InlineKeyboardButton("✈️ مراسلة تيليجرام", url="https://t.me/gopro_store_team")
-    )
-    bot.send_message(message.chat.id, support_text, reply_markup=markup)
+    try:
+        support_text = (
+            "🛠 <b>مركز المساعدة والدعم الفني | GoPro Store Team</b>\n\n"
+            "فريقنا متواجد دائماً لمساعدتك في الاستفسار أو تفعيل ومتابعة طلباتك:\n\n"
+            f"📱 <b>واتساب:</b> <code>{SUPPORT_WHATSAPP}</code>\n"
+            f"✈️ <b>تيليجرام:</b> {SUPPORT_TELEGRAM}\n"
+            "⏰ مواعيد العمل: متواجدون على مدار 24 ساعة للرد السريع."
+        )
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("💬 مراسلة واتساب", url=f"https://wa.me/2{SUPPORT_WHATSAPP}"),
+            types.InlineKeyboardButton("✈️ مراسلة تيليجرام", url="https://t.me/gopro_store_team")
+        )
+        bot.send_message(message.chat.id, support_text, reply_markup=markup)
+    except Exception as e:
+        print(f"Error in support handler: {e}")
+        bot.send_message(message.chat.id, "⚠️ حدث خطأ في عرض معلومات الدعم الفني. يرجى المحاولة لاحقاً.")
 
 @bot.message_handler(func=lambda msg: msg.text == "📦 سجل مشترياتي")
 def handle_my_orders(message):
@@ -599,21 +670,22 @@ def handle_my_orders(message):
 
 # ================= Inline Callbacks: Product & Package Browsing =================
 @bot.callback_query_handler(func=lambda c: c.data == "back_to_products")
+@safe_callback
 def handle_back_to_products_callback(call):
+    bot.answer_callback_query(call.id)
     user_id = call.from_user.id
     role = get_user_role(user_id)
     badge = role_badge_display(role)
-    bot.edit_message_text(
+    safe_edit_message_text(
+        call,
         f"🛍 <b>قائمة المنتجات المتاحة</b>\n"
         f"حسابك: <b>{badge}</b>\n\n"
         "اضغط على أي منتج لعرض باقاته وتفاصيل الشراء:",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
         reply_markup=build_products_inline_menu(user_id)
     )
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("prod_"))
+@safe_callback
 def handle_product_click(call):
     user_id = call.from_user.id
     prod_key = call.data.replace("prod_", "")
@@ -667,6 +739,7 @@ def handle_product_click(call):
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("subcat_"))
+@safe_callback
 def handle_subcategory_click(call):
     user_id = call.from_user.id
     parts = call.data.split("_", 2)
@@ -688,6 +761,7 @@ def handle_subcategory_click(call):
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pkg_"))
+@safe_callback
 def handle_package_view(call):
     user_id = call.from_user.id
     _, prod_key, pkg_id = call.data.split("_", 2)
@@ -742,6 +816,7 @@ def handle_package_view(call):
 
 # ================= Purchase Flow =================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
+@safe_callback
 def handle_buy_click(call):
     user_id = call.from_user.id
     _, prod_key, pkg_id = call.data.split("_", 2)
@@ -764,6 +839,7 @@ def handle_buy_click(call):
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("cancel_order_"))
+@safe_callback
 def handle_cancel_order(call):
     user_id = call.from_user.id
     request_id = int(call.data.replace("cancel_order_", ""))
@@ -774,6 +850,7 @@ def handle_cancel_order(call):
     bot.answer_callback_query(call.id, "تم الإلغاء")
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("qty_"))
+@safe_callback
 def handle_quantity_click(call):
     user_id = call.from_user.id
     parts = call.data.split("_")
@@ -818,6 +895,7 @@ def proceed_with_quantity(user_id, state, quantity, chat_id, message_id=None):
     bot.send_message(chat_id, text, reply_markup=build_coupon_decision_keyboard(state["request_id"]))
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("use_coupon_"))
+@safe_callback
 def handle_use_coupon_click(call):
     user_id = call.from_user.id
     request_id = int(call.data.replace("use_coupon_", ""))
@@ -832,6 +910,7 @@ def handle_use_coupon_click(call):
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("skip_coupon_"))
+@safe_callback
 def handle_skip_coupon_click(call):
     user_id = call.from_user.id
     request_id = int(call.data.replace("skip_coupon_", ""))
@@ -856,6 +935,11 @@ def apply_coupon_to_order(user_id, state, code, chat_id):
     used_count = coupon.get("used_count", 0)
     if used_count >= max_uses:
         bot.send_message(chat_id, "⚠️ تم الوصول للحد الأقصى لاستخدام هذا الكود.\nأرسل كود آخر أو /skip للمتابعة.")
+        return
+
+    applicable_products = coupon.get("applicable_products")
+    if applicable_products and state.get("product_key") not in applicable_products:
+        bot.send_message(chat_id, "⚠️ عذراً، هذا الكوبون غير متاح لهذا المنتج!\nأرسل كود آخر أو /skip للمتابعة.")
         return
 
     # Calculate discount
@@ -912,6 +996,98 @@ def show_payment_instructions(user_id, state, chat_id):
 @bot.message_handler(content_types=["photo"])
 def handle_receipt_photo(message):
     user_id = message.from_user.id
+
+    # Admin broadcast photo
+    admin_state = admin_action_states.get(user_id)
+    if admin_state and admin_state.get("action") in ("broadcast_text", "broadcast_photo") and user_id == ADMIN_ID:
+        admin_action_states.pop(user_id, None)
+        photo_id = message.photo[-1].file_id
+        caption = message.caption or ""
+
+        # Get all user IDs from database
+        user_ids = set()
+        with database_connection() as conn:
+            rows = conn.execute("SELECT DISTINCT user_id FROM payment_requests").fetchall()
+            for row in rows:
+                user_ids.add(row["user_id"])
+        # Also add from user_roles
+        roles = get_user_roles()
+        for uid in roles.keys():
+            if uid.isdigit():
+                user_ids.add(int(uid))
+
+        sent_count = 0
+        failed_count = 0
+        for uid in user_ids:
+            try:
+                bot.send_photo(uid, photo_id, caption=caption, parse_mode="HTML")
+                sent_count += 1
+            except Exception:
+                failed_count += 1
+
+        bot.reply_to(
+            message,
+            f"📊 <b>تقرير الإذاعة الجماعية (صورة)</b>\n\n"
+            f"✅ تم الإرسال بنجاح: <b>{sent_count}</b> مستخدم\n"
+            f"❌ فشل الإرسال: <b>{failed_count}</b> مستخدم\n"
+            f"👥 إجمالي المحاولات: <b>{sent_count + failed_count}</b>"
+        )
+        return
+
+    # Admin new product photo upload
+    if admin_state and admin_state.get("action") == "add_product_photo" and user_id == ADMIN_ID:
+        product_name = admin_state.get("product_name", "منتج جديد")
+        product_key = admin_state.get("product_key", "new_product")
+        description = admin_state.get("description", "")
+        admin_action_states.pop(user_id, None)
+
+        photo_id = message.photo[-1].file_id
+        store = get_store_data()
+        store[product_key] = {
+            "name": product_name,
+            "available": True,
+            "photo": photo_id,
+            "description": description,
+            "packages": []
+        }
+        update_store_data(store)
+
+        bot.reply_to(
+            message,
+            f"✅ تم إضافة المنتج <b>{product_name}</b> بنجاح مع الصورة!\n\n"
+            f"🔑 المفتاح: <code>{product_key}</code>\n"
+            f"🖼️ الصورة: تم حفظها\n"
+            f"📦 الباقات: 0 (يمكنك إضافة باقات لاحقاً)\n\n"
+            "💡 استخدم <b>➕ إضافة باقة جديدة</b> لإضافة باقات لهذا المنتج."
+        )
+        return
+
+    # Admin product photo upload (update existing)
+    if admin_state and admin_state.get("action") == "update_product_photo" and user_id == ADMIN_ID:
+        prod_key = admin_state["prod_key"]
+        admin_action_states.pop(user_id, None)
+
+        photo_id = message.photo[-1].file_id
+        store = get_store_data()
+        prod = store.get(prod_key)
+        if not prod:
+            bot.reply_to(message, "⚠️ المنتج غير موجود.")
+            return
+
+        prod["photo"] = photo_id
+        # Also update photo for all packages that don't have their own photo
+        for pkg in prod.get("packages", []):
+            if not pkg.get("photo"):
+                pkg["photo"] = photo_id
+        update_store_data(store)
+
+        bot.reply_to(
+            message,
+            f"✅ تم تحديث صورة المنتج <b>{prod['name']}</b> بنجاح!\n\n"
+            f"🖼️ سيتم عرض هذه الصورة عند تصفح المنتج وباقاته."
+        )
+        return
+
     state = user_states.get(user_id)
     if not state or state.get("step") != "awaiting_receipt":
         return
@@ -1325,6 +1501,7 @@ def record_coupon_usage_on_acceptance(order_row):
 
 # ================= Admin Decision Callbacks =================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_acc_"))
+@safe_callback
 def handle_admin_accept(call):
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "غير مصرح لك.", show_alert=True)
@@ -1360,6 +1537,7 @@ def handle_admin_accept(call):
         pass
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_rej_"))
+@safe_callback
 def handle_admin_reject(call):
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "غير مصرح لك.", show_alert=True)
@@ -1411,7 +1589,23 @@ def build_admin_main_keyboard():
         types.InlineKeyboardButton("🔔 مركز وسجل التنبيهات", callback_data="adm_view_notifications")
     )
     markup.add(
-        types.InlineKeyboardButton("📦 حالة توفر المنتجات", callback_data="adm_toggle_products")
+        types.InlineKeyboardButton("📦 حالة توفر المنتجات", callback_data="adm_toggle_products"),
+        types.InlineKeyboardButton("✏️ تعديل وصف المنتجات", callback_data="adm_edit_descriptions")
+    )
+    markup.add(
+        types.InlineKeyboardButton("🖼️ إضافة/تعديل صورة المنتج", callback_data="adm_manage_photos"),
+        types.InlineKeyboardButton("🎛️ توفر الباقات الفردية", callback_data="adm_tier_availability")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📢 إذاعة جماعية", callback_data="adm_broadcast")
+    )
+    markup.add(
+        types.InlineKeyboardButton("➕ إضافة منتج جديد", callback_data="adm_add_product"),
+        types.InlineKeyboardButton("🗑️ حذف منتج", callback_data="adm_delete_product")
+    )
+    markup.add(
+        types.InlineKeyboardButton("➕ إضافة باقة جديدة", callback_data="adm_add_tier"),
+        types.InlineKeyboardButton("🗑️ حذف باقة", callback_data="adm_delete_tier")
     )
     return markup
 
@@ -1431,22 +1625,24 @@ def handle_admin_panel(message):
     )
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_back_to_main")
+@safe_callback
 def handle_adm_back_to_main(call):
     if call.from_user.id != ADMIN_ID:
         return
-    bot.edit_message_text(
+    bot.answer_callback_query(call.id)
+    safe_edit_message_text(
+        call,
         "🛠 <b>لوحة تحكم وإدارة المتجر (Admin Dashboard)</b>\n\nاختر من الأقسام التالية:",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
         reply_markup=build_admin_main_keyboard()
     )
-    bot.answer_callback_query(call.id)
 
 # 1. Pending orders review
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_pending")
+@safe_callback
 def handle_adm_view_pending(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     with database_connection() as conn:
         pending = conn.execute("""
             SELECT * FROM payment_requests WHERE status = 'awaiting_admin' ORDER BY id ASC LIMIT 10
@@ -1455,20 +1651,20 @@ def handle_adm_view_pending(call):
     if not pending:
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-        bot.edit_message_text("✅ لا توجد أي اشتراكات معلقة حالياً! جميع الطلبات تم التعامل معها.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-        bot.answer_callback_query(call.id)
+        safe_edit_message_text(call, "✅ لا توجد أي اشتراكات معلقة حالياً! جميع الطلبات تم التعامل معها.", reply_markup=markup)
         return
 
     bot.send_message(call.message.chat.id, f"📋 يوجد <b>{len(pending)}</b> طلب معلق قيد المراجعة:")
     for row in pending:
-        send_admin_order_notification(row["id"])
-    bot.answer_callback_query(call.id)
+        notify_admins_new_order(row["id"])
 
 # 2. Sales Statistics
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_stats")
+@safe_callback
 def handle_adm_view_stats(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     with database_connection() as conn:
         accepted = conn.execute("SELECT * FROM payment_requests WHERE status = 'accepted'").fetchall()
 
@@ -1499,14 +1695,15 @@ def handle_adm_view_stats(call):
     )
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main"))
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 # 3. Roles Management
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_roles")
+@safe_callback
 def handle_adm_view_roles(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     roles = get_user_roles()
     resellers = [f"• ID: <code>{uid}</code> | {info.get('name')} (@{info.get('username', 'بدون')})" for uid, info in roles.items() if info.get("role") == "reseller"]
     friends = [f"• ID: <code>{uid}</code> | {info.get('name')} (@{info.get('username', 'بدون')})" for uid, info in roles.items() if info.get("role") == "friend"]
@@ -1529,10 +1726,10 @@ def handle_adm_view_roles(call):
         types.InlineKeyboardButton("➖ سحب رتبة (إرجاع كعميل)", callback_data="adm_role_set_customer")
     )
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_role_set_"))
+@safe_callback
 def handle_adm_role_prompt(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -1548,26 +1745,29 @@ def handle_adm_role_prompt(call):
 
 # 4. 3-tier Price Editing
 @bot.callback_query_handler(func=lambda c: c.data == "adm_edit_prices")
+@safe_callback
 def handle_adm_edit_prices_select_prod(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     store = get_store_data()
     markup = types.InlineKeyboardMarkup(row_width=2)
     btns = [types.InlineKeyboardButton(p["name"], callback_data=f"adm_price_prod_{k}") for k, p in store.items()]
     markup.add(*btns)
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text("🏷 <b>تعديل الأسعار الثلاثية</b>\nاختر المنتج الذي ترغب في تعديل أسعار باقاته:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, "🏷 <b>تعديل الأسعار الثلاثية</b>\nاختر المنتج الذي ترغب في تعديل أسعار باقاته:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_price_prod_"))
+@safe_callback
 def handle_adm_edit_prices_select_pkg(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     prod_key = call.data.replace("adm_price_prod_", "")
     store = get_store_data()
     prod = store.get(prod_key)
     if not prod:
-        bot.answer_callback_query(call.id, "المنتج غير موجود.")
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
         return
 
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -1575,19 +1775,20 @@ def handle_adm_edit_prices_select_pkg(call):
         text = f"{pkg['label']} | ع:{pkg.get('retail_price')} ت:{pkg.get('reseller_price')} ص:{pkg.get('friend_price')}"
         markup.add(types.InlineKeyboardButton(text, callback_data=f"adm_pkg_tier_{prod_key}_{pkg['id']}"))
     markup.add(types.InlineKeyboardButton("🔙 رجوع للمنتجات", callback_data="adm_edit_prices"))
-    bot.edit_message_text(f"اختر الباقة المراد تعديل أسعارها في <b>{prod['name']}</b>:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, f"اختر الباقة المراد تعديل أسعارها في <b>{prod['name']}</b>:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_pkg_tier_"))
+@safe_callback
 def handle_adm_choose_price_tier(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     _, _, _, prod_key, pkg_id = call.data.split("_", 4)
     store = get_store_data()
     prod = store.get(prod_key)
     pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
     if not pkg:
-        bot.answer_callback_query(call.id, "الباقة غير موجودة.")
+        bot.answer_callback_query(call.id, "الباقة غير موجودة.", show_alert=True)
         return
 
     text = (
@@ -1604,10 +1805,10 @@ def handle_adm_choose_price_tier(call):
         types.InlineKeyboardButton("🤝 تعديل سعر الصديق (Friend)", callback_data=f"adm_setprice_{prod_key}_{pkg_id}_friend_price"),
         types.InlineKeyboardButton("🔙 رجوع للباقات", callback_data=f"adm_price_prod_{prod_key}")
     )
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_setprice_"))
+@safe_callback
 def handle_adm_setprice_prompt(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -1628,16 +1829,24 @@ def handle_adm_setprice_prompt(call):
 
 # 5. Coupon System Management
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_coupons")
+@safe_callback
 def handle_adm_view_coupons(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     coupons = get_coupons()
     lines = []
     for code, c in coupons.items():
         status = "✅ نشط" if c.get("active", True) else "❌ معطل"
+        applicable = c.get("applicable_products")
+        if applicable:
+            scope = f"📦 {', '.join(applicable)}"
+        else:
+            scope = "📦 جميع المنتجات"
         lines.append(
             f"🎟 <b>{code}</b> ({c.get('influencer', 'بدون')}) - {status}\n"
-            f"   استخدامات: {c.get('used_count', 0)} / {c.get('max_uses', 'غير محدود')} | خصم ثابت: {c.get('fixed_discount', 0)}ج"
+            f"   استخدامات: {c.get('used_count', 0)} / {c.get('max_uses', 'غير محدود')} | خصم ثابت: {c.get('fixed_discount', 0)}ج\n"
+            f"   {scope}"
         )
     coupons_text = "\n\n".join(lines) if lines else "لا توجد كوبونات منشأة حالياً."
 
@@ -1648,10 +1857,10 @@ def handle_adm_view_coupons(call):
         types.InlineKeyboardButton("🗑 حذف كوبون", callback_data="adm_coupon_delete")
     )
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_coupon_create")
+@safe_callback
 def handle_adm_coupon_create_prompt(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -1666,9 +1875,11 @@ def handle_adm_coupon_create_prompt(call):
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_coupon_delete")
+@safe_callback
 def handle_adm_coupon_delete_prompt(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     coupons = get_coupons()
     if not coupons:
         bot.answer_callback_query(call.id, "لا توجد كوبونات لحذفها.", show_alert=True)
@@ -1677,10 +1888,10 @@ def handle_adm_coupon_delete_prompt(call):
     btns = [types.InlineKeyboardButton(f"❌ {c}", callback_data=f"adm_del_coup_{c}") for c in coupons]
     markup.add(*btns)
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_view_coupons"))
-    bot.edit_message_text("اختر الكوبون المراد حذفه نهائياً:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, "اختر الكوبون المراد حذفه نهائياً:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_coup_"))
+@safe_callback
 def handle_adm_confirm_delete_coupon(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -1690,7 +1901,101 @@ def handle_adm_confirm_delete_coupon(call):
         del coupons[code]
         update_coupons(coupons)
     bot.answer_callback_query(call.id, f"تم حذف الكوبون {code}")
+    # Reuse the view handler to refresh the list (it will answer callback again, but that's fine)
     handle_adm_view_coupons(call)
+
+# ================= Coupon Product Selection Callbacks =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_sel_all")
+@safe_callback
+def handle_adm_cpn_select_all(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    state["selected_products"] = []
+    admin_action_states[call.from_user.id] = state
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=build_coupon_product_selection_keyboard(call.from_user.id)
+    )
+    bot.answer_callback_query(call.id, "تم اختيار جميع المنتجات")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cpn_sel_") and c.data != "adm_cpn_sel_all")
+@safe_callback
+def handle_adm_cpn_toggle_product(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    prod_key = call.data.replace("adm_cpn_sel_", "")
+    selected = state.get("selected_products", [])
+    if prod_key in selected:
+        selected.remove(prod_key)
+    else:
+        selected.append(prod_key)
+    state["selected_products"] = selected
+    admin_action_states[call.from_user.id] = state
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=build_coupon_product_selection_keyboard(call.from_user.id)
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_confirm")
+@safe_callback
+def handle_adm_cpn_confirm_creation(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    admin_action_states.pop(call.from_user.id, None)
+
+    code = state["code"]
+    influencer = state["influencer"]
+    discount = state["discount"]
+    selected = state.get("selected_products", [])
+    applicable = selected if selected else []
+
+    coupons = get_coupons()
+    coupons[code] = {
+        "code": code,
+        "influencer": influencer,
+        "discount_type": "fixed",
+        "fixed_discount": discount,
+        "package_discounts": {},
+        "max_uses": 500,
+        "used_count": 0,
+        "active": True,
+        "created_at": utc_now(),
+        "usage_history": []
+    }
+    if applicable:
+        coupons[code]["applicable_products"] = applicable
+    update_coupons(coupons)
+
+    if applicable:
+        products_label = ", ".join(applicable)
+        scope_msg = f"📦 المنتجات المحددة: <b>{products_label}</b>"
+    else:
+        scope_msg = "📦 ينطبق على: <b>جميع المنتجات</b>"
+
+    bot.edit_message_text(
+        f"✅ تم إنشاء الكوبون <b>{code}</b> بنجاح!\n"
+        f"🏷 برعاية: <b>{influencer}</b>\n"
+        f"✂️ قيمة الخصم: <b>{discount}ج</b>\n"
+        f"{scope_msg}",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id
+    )
+    bot.answer_callback_query(call.id, "تم إنشاء الكوبون بنجاح!")
 
 # ================= 5.1 Detailed Coupon Statistics & Reports =================
 def send_chunked_messages(chat_id, text, reply_markup=None):
@@ -1753,11 +2058,18 @@ def format_coupon_detailed_report(code, c):
     status_str = "✅ نشط وفعال" if c.get("active", True) else "❌ معطل"
     history_text = "\n\n".join(ops_lines) if ops_lines else "<i>لا توجد عمليات شراء معتمدة ومكتملة بهذا الكوبون حتى الآن.</i>"
 
+    applicable = c.get("applicable_products")
+    if applicable:
+        scope_str = f"📦 <b>المنتجات المحددة:</b> {', '.join(applicable)}\n"
+    else:
+        scope_str = "📦 <b>ينطبق على:</b> جميع المنتجات\n"
+
     report = (
         f"🎟 <b>تقرير الكوبون:</b> <code>{code}</code>\n"
         f"🏷 <b>المؤثر / الجهة:</b> <b>{c.get('influencer', 'عام')}</b>\n"
         f"📌 <b>الحالة:</b> {status_str}\n"
         f"✂️ <b>قيمة الكوبون:</b> {val_str}\n"
+        f"{scope_str}"
         f"📊 <b>إجمالي مرات الاستخدام:</b> {used_count} من {c.get('max_uses', 'غير محدود')}\n"
         f"💰 <b>إجمالي الخصم الممنوح:</b> {format_currency(total_discount)}\n"
         f"💵 <b>إجمالي المبيعات المحققة منه:</b> {format_currency(total_revenue)}\n"
@@ -1768,20 +2080,20 @@ def format_coupon_detailed_report(code, c):
     return report, total_discount, total_revenue, used_count
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_coupon_stats")
+@safe_callback
 def handle_adm_coupon_stats_menu(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     coupons = get_coupons()
     if not coupons:
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main"))
-        bot.edit_message_text(
+        safe_edit_message_text(
+            call,
             "📊 <b>إحصائيات واستخدام الكوبونات</b>\n\nلا توجد أي كوبونات مسجلة في النظام حالياً.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
             reply_markup=markup
         )
-        bot.answer_callback_query(call.id)
         return
 
     total_coupons = len(coupons)
@@ -1818,18 +2130,14 @@ def handle_adm_coupon_stats_menu(call):
         "━━━━━━━━━━━━━━━━━━━\n"
         "👇 <b>اختر كود الكوبون لعرض تفاصيل عملياته الدقيقة:</b>"
     )
-    bot.edit_message_text(
-        overview_text,
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=markup
-    )
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, overview_text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cpstat_") and c.data != "adm_cpstat_all")
+@safe_callback
 def handle_adm_single_coupon_detail(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     code = call.data.replace("adm_cpstat_", "")
     coupons = get_coupons()
     c = coupons.get(code)
@@ -1844,15 +2152,16 @@ def handle_adm_single_coupon_detail(call):
     )
 
     send_chunked_messages(call.message.chat.id, report_text, reply_markup=markup)
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_cpstat_all")
+@safe_callback
 def handle_adm_all_coupons_report(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     coupons = get_coupons()
     if not coupons:
-        bot.answer_callback_query(call.id, "لا توجد كوبونات مسجلة.")
+        bot.answer_callback_query(call.id, "لا توجد كوبونات مسجلة.", show_alert=True)
         return
 
     full_reports = []
@@ -1867,9 +2176,9 @@ def handle_adm_all_coupons_report(call):
     markup.add(types.InlineKeyboardButton("🔙 رجوع لإحصائيات الكوبونات", callback_data="adm_coupon_stats"))
 
     send_chunked_messages(call.message.chat.id, full_text, reply_markup=markup)
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_export_coupons")
+@safe_callback
 def handle_adm_export_coupons_file(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -1914,6 +2223,7 @@ def handle_adm_export_coupons_file(call):
 
 # 6. Customer Profile Lookup
 @bot.callback_query_handler(func=lambda c: c.data == "adm_lookup_customer")
+@safe_callback
 def handle_adm_lookup_customer_prompt(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -1927,6 +2237,7 @@ def handle_adm_lookup_customer_prompt(call):
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cust_"))
+@safe_callback
 def handle_adm_customer_shortcut(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -1986,19 +2297,21 @@ def generate_customer_report(user_id=None, username=None):
 
 # 7. Product Stock Toggle
 @bot.callback_query_handler(func=lambda c: c.data == "adm_toggle_products")
+@safe_callback
 def handle_adm_toggle_products_view(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     store = get_store_data()
     markup = types.InlineKeyboardMarkup(row_width=1)
     for k, p in store.items():
         status = "✅ متوفر" if p.get("available", True) else "❌ غير متوفر"
         markup.add(types.InlineKeyboardButton(f"{status} - {p['name']}", callback_data=f"adm_tog_{k}"))
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text("اضغط على أي منتج لتغيير حالة توفره الفوري:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, "اضغط على أي منتج لتغيير حالة توفره الفوري:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_tog_"))
+@safe_callback
 def handle_adm_toggle_product_status(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -2008,13 +2321,144 @@ def handle_adm_toggle_product_status(call):
         store[prod_key]["available"] = not store[prod_key].get("available", True)
         update_store_data(store)
     bot.answer_callback_query(call.id, "تم تحديث حالة المنتج")
+    # Reuse the view handler to refresh the list
     handle_adm_toggle_products_view(call)
+
+# 7.1 Product Description Editing
+@bot.callback_query_handler(func=lambda c: c.data == "adm_edit_descriptions")
+@safe_callback
+def handle_adm_edit_descriptions_view(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    store = get_store_data()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for k, p in store.items():
+        desc_preview = (p.get("description", "")[:40] + "...") if len(p.get("description", "")) > 40 else p.get("description", "بدون وصف")
+        markup.add(types.InlineKeyboardButton(
+            f"✏️ {p['name']}",
+            callback_data=f"adm_edit_desc_{k}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
+    safe_edit_message_text(
+        call,
+        "✏️ <b>تعديل وصف المنتجات</b>\n\nاختر المنتج الذي ترغب في تعديل وصفه:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_edit_desc_"))
+@safe_callback
+def handle_adm_edit_desc_prompt(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    prod_key = call.data.replace("adm_edit_desc_", "")
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+    admin_action_states[call.from_user.id] = {"action": "edit_description", "prod_key": prod_key}
+    current_desc = prod.get("description", "بدون وصف")
+    bot.send_message(
+        call.message.chat.id,
+        f"✏️ <b>تعديل وصف المنتج:</b> <b>{prod['name']}</b>\n\n"
+        f"📝 <b>الوصف الحالي:</b>\n{current_desc}\n\n"
+        "أرسل الآن الوصف الجديد للمنتج:\n"
+        "أو أرسل /cancel للإلغاء:"
+    )
+    bot.answer_callback_query(call.id)
+
+# 7.2 Product Photo Management
+@bot.callback_query_handler(func=lambda c: c.data == "adm_manage_photos")
+@safe_callback
+def handle_adm_manage_photos_view(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    store = get_store_data()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for k, p in store.items():
+        has_photo = "🖼️" if p.get("photo") else "📷"
+        markup.add(types.InlineKeyboardButton(
+            f"{has_photo} {p['name']}",
+            callback_data=f"adm_photo_{k}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
+    safe_edit_message_text(
+        call,
+        "🖼️ <b>إدارة صور المنتجات</b>\n\n"
+        "اختر المنتج الذي ترغب في إضافة أو تعديل صورته:\n"
+        "🖼️ = صورة موجودة | 📷 = بدون صورة",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_photo_"))
+@safe_callback
+def handle_adm_photo_product_selected(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    prod_key = call.data.replace("adm_photo_", "")
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+
+    current_photo = prod.get("photo", "")
+    photo_status = f"✅ الصورة الحالية: <code>{current_photo[:50]}...</code>" if current_photo else "❌ لا توجد صورة حالياً"
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    if current_photo:
+        markup.add(types.InlineKeyboardButton("🗑 حذف الصورة الحالية", callback_data=f"adm_del_photo_{prod_key}"))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_manage_photos"))
+
+    admin_action_states[call.from_user.id] = {"action": "update_product_photo", "prod_key": prod_key}
+    bot.send_message(
+        call.message.chat.id,
+        f"🖼️ <b>تعديل صورة المنتج:</b> <b>{prod['name']}</b>\n\n"
+        f"{photo_status}\n\n"
+        "أرسل الآن صورة جديدة للمنتج (كبصورة Photo مباشرة):\n"
+        "أو أرسل /cancel للإلغاء:"
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_photo_"))
+@safe_callback
+def handle_adm_delete_product_photo(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    prod_key = call.data.replace("adm_del_photo_", "")
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+
+    prod.pop("photo", None)
+    update_store_data(store)
+
+    # Also remove photo from packages
+    for pkg in prod.get("packages", []):
+        pkg.pop("photo", None)
+    update_store_data(store)
+
+    bot.answer_callback_query(call.id, "تم حذف الصورة بنجاح!")
+    bot.edit_message_text(
+        f"✅ تم حذف صورة المنتج <b>{prod['name']}</b> بنجاح!",
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_manage_photos")
+        )
+    )
 
 # 8. Notifications Center & Test
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_notifications")
+@safe_callback
 def handle_adm_view_notifications(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     with database_connection() as conn:
         total_logs = conn.execute("SELECT COUNT(*) AS c FROM notifications_log").fetchone()["c"]
         recent = conn.execute("""
@@ -2042,10 +2486,10 @@ def handle_adm_view_notifications(call):
         types.InlineKeyboardButton("📨 إرسال إشعار فوري لمستخدم محدد", callback_data="adm_send_user_alert"),
         types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main")
     )
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_test_alert")
+@safe_callback
 def handle_adm_test_alert(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -2062,6 +2506,7 @@ def handle_adm_test_alert(call):
     bot.answer_callback_query(call.id, "✅ تم إرسال التنبيه التجريبي لهاتفك بصوت واهتزاز!", show_alert=True)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_send_user_alert")
+@safe_callback
 def handle_adm_send_user_alert_prompt(call):
     if call.from_user.id != ADMIN_ID:
         return
@@ -2076,9 +2521,383 @@ def handle_adm_send_user_alert_prompt(call):
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "btn_my_orders")
+@safe_callback
 def handle_notification_my_orders(call):
     handle_my_orders(call.message)
     bot.answer_callback_query(call.id)
+
+# ================= Unavailable Package Handler =================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pkg_unavailable_"))
+@safe_callback
+def handle_unavailable_package_click(call):
+    bot.answer_callback_query(call.id, "⚠️ عذراً، هذه الباقة غير متوفرة حالياً. يرجى اختيار باقة أخرى.", show_alert=True)
+
+# ================= Granular Tier Availability Management =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_tier_availability")
+@safe_callback
+def handle_adm_tier_availability_view(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    store = get_store_data()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for k, p in store.items():
+        markup.add(types.InlineKeyboardButton(
+            f"📦 {p['name']}",
+            callback_data=f"adm_tier_prod_{k}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
+    safe_edit_message_text(
+        call,
+        "🎛️ <b>إدارة توفر الباقات الفردية</b>\n\nاختر المنتج للتحكم في توفر كل باقة على حدة:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_tier_prod_"))
+@safe_callback
+def handle_adm_tier_select_product(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    prod_key = call.data.replace("adm_tier_prod_", "")
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for pkg in prod.get("packages", []):
+        status = "🟢" if pkg.get("available", True) else "🔴"
+        avail_text = "متوفر" if pkg.get("available", True) else "غير متوفر"
+        markup.add(types.InlineKeyboardButton(
+            f"{status} {pkg['label']} — {avail_text}",
+            callback_data=f"adm_tier_toggle_{prod_key}_{pkg['id']}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_tier_availability"))
+    safe_edit_message_text(
+        call,
+        f"🎛️ <b>توفر باقات:</b> <b>{prod['name']}</b>\n\n"
+        "🟢 = متوفر | 🔴 = غير متوفر\n"
+        "اضغط على أي باقة لتغيير حالتها:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_tier_toggle_"))
+@safe_callback
+def handle_adm_tier_toggle(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    parts = call.data.replace("adm_tier_toggle_", "").split("_", 1)
+    prod_key = parts[0]
+    pkg_id = parts[1]
+
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+
+    pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
+    if not pkg:
+        bot.answer_callback_query(call.id, "الباقة غير موجودة.", show_alert=True)
+        return
+
+    pkg["available"] = not pkg.get("available", True)
+    update_store_data(store)
+
+    new_status = "متوفرة ✅" if pkg["available"] else "غير متوفرة ❌"
+    bot.answer_callback_query(call.id, f"تم تحديث حالة الباقة إلى: {new_status}")
+
+    # Refresh the view
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for p in prod.get("packages", []):
+        status = "🟢" if p.get("available", True) else "🔴"
+        avail_text = "متوفر" if p.get("available", True) else "غير متوفر"
+        markup.add(types.InlineKeyboardButton(
+            f"{status} {p['label']} — {avail_text}",
+            callback_data=f"adm_tier_toggle_{prod_key}_{p['id']}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_tier_availability"))
+    safe_edit_message_text(
+        call,
+        f"🎛️ <b>توفر باقات:</b> <b>{prod['name']}</b>\n\n"
+        "🟢 = متوفر | 🔴 = غير متوفر\n"
+        "اضغط على أي باقة لتغيير حالتها:",
+        reply_markup=markup
+    )
+
+# ================= Broadcast / Mass Messaging =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_broadcast")
+@safe_callback
+def handle_adm_broadcast_prompt(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    admin_action_states[call.from_user.id] = {"action": "broadcast_text"}
+    bot.send_message(
+        call.message.chat.id,
+        "📢 <b>الإذاعة الجماعية</b>\n\n"
+        "أرسل الآن نص الرسالة التي تريد إرسالها لجميع المستخدمين المسجلين.\n\n"
+        "💡 يمكنك إرسال:\n"
+        "• نص عادي\n"
+        "• صورة مع تعليق (أرسل الصورة مباشرة)\n\n"
+        "أو أرسل /cancel للإلغاء:"
+    )
+    bot.answer_callback_query(call.id)
+
+# ================= Product CRUD (Add/Delete) =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_add_product")
+@safe_callback
+def handle_adm_add_product_start(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    admin_action_states[call.from_user.id] = {"action": "add_product_name"}
+    bot.send_message(
+        call.message.chat.id,
+        "➕ <b>إضافة منتج جديد</b>\n\n"
+        "أرسل الآن <b>اسم المنتج</b> (مثال: <code>نتفليكس Netflix</code>):\n\n"
+        "أو أرسل /cancel للإلغاء:"
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_delete_product")
+@safe_callback
+def handle_adm_delete_product_list(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    store = get_store_data()
+    if not store:
+        safe_edit_message_text(call, "❌ لا توجد منتجات في المتجر حالياً.", reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main")
+        ))
+        return
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for k, p in store.items():
+        pkg_count = len(p.get("packages", []))
+        markup.add(types.InlineKeyboardButton(
+            f"🗑️ {p['name']} ({pkg_count} باقة)",
+            callback_data=f"adm_del_prod_{k}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
+    safe_edit_message_text(call, "🗑️ <b>حذف منتج</b>\n\nاختر المنتج الذي تريد حذفه نهائياً:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_prod_"))
+@safe_callback
+def handle_adm_delete_product_confirm(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    prod_key = call.data.replace("adm_del_prod_", "")
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    pkg_count = len(prod.get("packages", []))
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ نعم، احذف", callback_data=f"adm_confirm_del_prod_{prod_key}"),
+        types.InlineKeyboardButton("❌ إلغاء", callback_data="adm_delete_product")
+    )
+    safe_edit_message_text(
+        call,
+        f"⚠️ <b>تأكيد الحذف</b>\n\n"
+        f"هل أنت متأكد من حذف المنتج التالي نهائياً؟\n\n"
+        f"📦 <b>{prod['name']}</b>\n"
+        f"📊 عدد الباقات: <b>{pkg_count}</b>\n\n"
+        f"⚠️ <b>تحذير:</b> لا يمكن التراجع عن هذا الإجراء!",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_confirm_del_prod_"))
+@safe_callback
+def handle_adm_delete_product_execute(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    prod_key = call.data.replace("adm_confirm_del_prod_", "")
+    store = get_store_data()
+    if prod_key not in store:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+    prod_name = store[prod_key]["name"]
+    del store[prod_key]
+    update_store_data(store)
+    bot.answer_callback_query(call.id, f"تم حذف {prod_name} بنجاح!")
+    safe_edit_message_text(
+        call,
+        f"✅ تم حذف المنتج <b>{prod_name}</b> وجميع باقاته بنجاح!\n\n"
+        f"📊 إجمالي المنتجات المتبقية: <b>{len(store)}</b>",
+        reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main")
+        )
+    )
+
+# ================= Tier CRUD (Add/Delete) =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_add_tier")
+@safe_callback
+def handle_adm_add_tier_select_product(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    store = get_store_data()
+    if not store:
+        safe_edit_message_text(call, "❌ لا توجد منتجات. أضف منتجاً أولاً.", reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main")
+        ))
+        return
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for k, p in store.items():
+        pkg_count = len(p.get("packages", []))
+        markup.add(types.InlineKeyboardButton(
+            f"📦 {p['name']} ({pkg_count} باقة)",
+            callback_data=f"adm_add_tier_{k}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
+    safe_edit_message_text(call, "➕ <b>إضافة باقة جديدة</b>\n\nاختر المنتج الذي تريد إضافة باقة له:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_add_tier_") and c.data != "adm_add_tier")
+@safe_callback
+def handle_adm_add_tier_start(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    prod_key = call.data.replace("adm_add_tier_", "")
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+    admin_action_states[call.from_user.id] = {
+        "action": "add_tier_label",
+        "prod_key": prod_key
+    }
+    bot.send_message(
+        call.message.chat.id,
+        f"➕ <b>إضافة باقة جديدة لـ:</b> <b>{prod['name']}</b>\n\n"
+        "أرسل الآن <b>اسم/عنوان الباقة</b> (مثال: <code>حساب خاص 3 شهور</code>):\n\n"
+        "أو أرسل /cancel للإلغاء:"
+    )
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_delete_tier")
+@safe_callback
+def handle_adm_delete_tier_select_product(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    store = get_store_data()
+    if not store:
+        safe_edit_message_text(call, "❌ لا توجد منتجات في المتجر.", reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main")
+        ))
+        return
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for k, p in store.items():
+        pkg_count = len(p.get("packages", []))
+        if pkg_count > 0:
+            markup.add(types.InlineKeyboardButton(
+                f"📦 {p['name']} ({pkg_count} باقة)",
+                callback_data=f"adm_del_tier_{k}"
+            ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
+    safe_edit_message_text(call, "🗑️ <b>حذف باقة</b>\n\nاختر المنتج الذي تريد حذف باقة منه:", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_tier_") and not c.data.startswith("adm_del_tier_conf_"))
+@safe_callback
+def handle_adm_delete_tier_select_tier(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    prod_key = call.data.replace("adm_del_tier_", "")
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    packages = prod.get("packages", [])
+    if not packages:
+        safe_edit_message_text(call, f"❌ لا توجد باقات في منتج <b>{prod['name']}</b>.", reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_delete_tier")
+        ))
+        return
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for pkg in packages:
+        markup.add(types.InlineKeyboardButton(
+            f"🗑️ {pkg['label']} ({pkg.get('retail_price', '?')})",
+            callback_data=f"adm_del_tier_conf_{prod_key}_{pkg['id']}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_delete_tier"))
+    safe_edit_message_text(
+        call,
+        f"🗑️ <b>حذف باقة من:</b> <b>{prod['name']}</b>\n\nاختر الباقة المراد حذفها:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_tier_conf_"))
+@safe_callback
+def handle_adm_delete_tier_confirm(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    parts = call.data.replace("adm_del_tier_conf_", "").split("_", 1)
+    prod_key = parts[0]
+    pkg_id = parts[1]
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+    pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
+    if not pkg:
+        bot.answer_callback_query(call.id, "الباقة غير موجودة.", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ نعم، احذف", callback_data=f"adm_exec_del_tier_{prod_key}_{pkg_id}"),
+        types.InlineKeyboardButton("❌ إلغاء", callback_data=f"adm_del_tier_{prod_key}")
+    )
+    safe_edit_message_text(
+        call,
+        f"⚠️ <b>تأكيد حذف الباقة</b>\n\n"
+        f"هل أنت متأكد من حذف الباقة التالية نهائياً؟\n\n"
+        f"📦 المنتج: <b>{prod['name']}</b>\n"
+        f"🏷️ الباقة: <b>{pkg['label']}</b>\n"
+        f"💰 السعر: <b>{pkg.get('retail_price', '?')}</b>\n\n"
+        f"⚠️ <b>تحذير:</b> لا يمكن التراجع عن هذا الإجراء!",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_exec_del_tier_"))
+@safe_callback
+def handle_adm_delete_tier_execute(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    parts = call.data.replace("adm_exec_del_tier_", "").split("_", 1)
+    prod_key = parts[0]
+    pkg_id = parts[1]
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+    packages = prod.get("packages", [])
+    pkg = next((p for p in packages if p["id"] == pkg_id), None)
+    if not pkg:
+        bot.answer_callback_query(call.id, "الباقة غير موجودة.", show_alert=True)
+        return
+    pkg_label = pkg["label"]
+    packages.remove(pkg)
+    update_store_data(store)
+    remaining = len(packages)
+    bot.answer_callback_query(call.id, f"تم حذف الباقة {pkg_label} بنجاح!")
+    safe_edit_message_text(
+        call,
+        f"✅ تم حذف الباقة <b>{pkg_label}</b> من منتج <b>{prod['name']}</b> بنجاح!\n\n"
+        f"📊 عدد الباقات المتبقية: <b>{remaining}</b>",
+        reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main")
+        )
+    )
 
 # ================= Admin Text Input Router =================
 def handle_admin_text_inputs(message):
@@ -2152,8 +2971,27 @@ def handle_admin_text_inputs(message):
         bot.reply_to(message, f"✅ تم تحديث <b>{tier_names.get(field)}</b> بنجاح إلى: <b>{clean_price}</b>")
         return
 
-    if action == "create_coupon_step1":
+    if action == "edit_description":
+        prod_key = state["prod_key"]
         admin_action_states.pop(admin_id, None)
+
+        new_desc = text
+        store = get_store_data()
+        prod = store.get(prod_key)
+        if not prod:
+            bot.reply_to(message, "⚠️ المنتج غير موجود.")
+            return
+
+        prod["description"] = new_desc
+        update_store_data(store)
+        bot.reply_to(
+            message,
+            f"✅ تم تحديث وصف المنتج <b>{prod['name']}</b> بنجاح!\n\n"
+            f"📝 <b>الوصف الجديد:</b>\n{new_desc}"
+        )
+        return
+
+    if action == "create_coupon_step1":
         parts = [p.strip() for p in text.split(",")]
         if len(parts) < 3:
             bot.reply_to(message, "⚠️ تنسيق غير صحيح. يرجى إرسال: الكود, اسم المؤثر, قيمة الخصم")
@@ -2167,21 +3005,20 @@ def handle_admin_text_inputs(message):
             bot.reply_to(message, "⚠️ قيمة الخصم يجب أن تكون رقماً.")
             return
 
-        coupons = get_coupons()
-        coupons[code] = {
+        admin_action_states[admin_id] = {
+            "action": "create_coupon_step2",
             "code": code,
             "influencer": influencer,
-            "discount_type": "fixed",
-            "fixed_discount": discount,
-            "package_discounts": {},
-            "max_uses": 500,
-            "used_count": 0,
-            "active": True,
-            "created_at": utc_now(),
-            "usage_history": []
+            "discount": discount,
+            "selected_products": []
         }
-        update_coupons(coupons)
-        bot.reply_to(message, f"✅ تم إنشاء الكوبون <b>{code}</b> بنجاح بقيمة خصم <b>{discount}ج</b> برعاية: <b>{influencer}</b>.")
+        bot.reply_to(
+            message,
+            f"🎟 <b>إنشاء كوبون: {code}</b>\n"
+            f"🏷 المؤثر: <b>{influencer}</b> | الخصم: <b>{discount}ج</b>\n\n"
+            "👇 اختر المنتجات التي ينطبق عليها هذا الكوبون، أو اضغط <b>الكل</b> لجميع المنتجات:",
+            reply_markup=build_coupon_product_selection_keyboard(admin_id)
+        )
         return
 
     if action == "lookup_customer":
@@ -2213,6 +3050,216 @@ def handle_admin_text_inputs(message):
             bot.reply_to(message, f"✅ تم إرسال التنبيه الفوري بنجاح إلى المستخدم <code>{target_uid}</code>!")
         else:
             bot.reply_to(message, f"❌ تعذر إرسال التنبيه إلى <code>{target_uid}</code> (قد يكون المستخدم لم يبدأ البوت بعد).")
+        return
+
+    if action == "broadcast_text":
+        admin_action_states.pop(admin_id, None)
+        if not text:
+            bot.reply_to(message, "⚠️ النص فارغ. يرجى إرسال نص الرسالة.")
+            return
+
+        # Get all user IDs from database
+        user_ids = set()
+        with database_connection() as conn:
+            rows = conn.execute("SELECT DISTINCT user_id FROM payment_requests").fetchall()
+            for row in rows:
+                user_ids.add(row["user_id"])
+        # Also add from user_roles
+        roles = get_user_roles()
+        for uid in roles.keys():
+            if uid.isdigit():
+                user_ids.add(int(uid))
+
+        sent_count = 0
+        failed_count = 0
+        for uid in user_ids:
+            try:
+                bot.send_message(uid, text, parse_mode="HTML")
+                sent_count += 1
+            except Exception:
+                failed_count += 1
+
+        bot.reply_to(
+            message,
+            f"📊 <b>تقرير الإذاعة الجماعية (نص)</b>\n\n"
+            f"✅ تم الإرسال بنجاح: <b>{sent_count}</b> مستخدم\n"
+            f"❌ فشل الإرسال: <b>{failed_count}</b> مستخدم\n"
+            f"👥 إجمالي المحاولات: <b>{sent_count + failed_count}</b>"
+        )
+        return
+
+    # ---- Add Product Flow ----
+    if action == "add_product_name":
+        if len(text) < 2 or len(text) > 100:
+            bot.reply_to(message, "⚠️ اسم المنتج يجب أن يكون بين 2 و 100 حرف. أرسل الاسم مرة أخرى:")
+            return
+        admin_action_states[admin_id] = {
+            "action": "add_product_key",
+            "product_name": text
+        }
+        bot.reply_to(
+            message,
+            f"✅ اسم المنتج: <b>{text}</b>\n\n"
+            "أرسل الآن <b>المفتاح الفريد</b> للمنتج (بالإنجليزية، بدون مسافات):\n"
+            "مثال: <code>netflix</code> أو <code>spotify</code>\n\n"
+            "أو أرسل /cancel للإلغاء:"
+        )
+        return
+
+    if action == "add_product_key":
+        clean_key = text.lower().replace(" ", "_")
+        if not re.match(r'^[a-z0-9_]+$', clean_key):
+            bot.reply_to(message, "⚠️ المفتاح يجب أن يحتوي على أحرف إنجلية صغيرة وأرقام وشرطة سفلية فقط. أرسل مرة أخرى:")
+            return
+        store = get_store_data()
+        if clean_key in store:
+            bot.reply_to(message, f"⚠️ المفتاح <code>{clean_key}</code> مستخدم بالفعل. أرسل مفتاحاً آخر:")
+            return
+        product_name = state.get("product_name", "منتج جديد")
+        admin_action_states[admin_id] = {
+            "action": "add_product_desc",
+            "product_name": product_name,
+            "product_key": clean_key
+        }
+        bot.reply_to(
+            message,
+            f"✅ المفتاح: <code>{clean_key}</code>\n\n"
+            "أرسل الآن <b>وصف المنتج</b>:\n\n"
+            "أو أرسل /cancel للإلغاء:"
+        )
+        return
+
+    if action == "add_product_desc":
+        product_name = state.get("product_name", "منتج جديد")
+        product_key = state.get("product_key", "new_product")
+        admin_action_states[admin_id] = {
+            "action": "add_product_photo",
+            "product_name": product_name,
+            "product_key": product_key,
+            "description": text
+        }
+        bot.reply_to(
+            message,
+            f"✅ الوصف تم حفظه.\n\n"
+            "🖼️ أرسل الآن <b>صورة للمنتج</b> (كبصورة Photo مباشرة):\n\n"
+            "أو أرسل <code>/skip</code> لتخطي إضافة الصورة:\n"
+            "أو أرسل /cancel للإلغاء:"
+        )
+        return
+
+    if action == "add_product_photo":
+        if text.lower() == "/skip":
+            product_name = state.get("product_name", "منتج جديد")
+            product_key = state.get("product_key", "new_product")
+            description = state.get("description", "")
+            admin_action_states.pop(admin_id, None)
+
+            store = get_store_data()
+            store[product_key] = {
+                "name": product_name,
+                "available": True,
+                "photo": "",
+                "description": description,
+                "packages": []
+            }
+            update_store_data(store)
+
+            bot.reply_to(
+                message,
+                f"✅ تم إضافة المنتج <b>{product_name}</b> بنجاح!\n\n"
+                f"🔑 المفتاح: <code>{product_key}</code>\n"
+                f"📦 الباقات: 0 (يمكنك إضافة باقات لاحقاً)\n\n"
+                "💡 استخدم <b>➕ إضافة باقة جديدة</b> لإضافة باقات لهذا المنتج."
+            )
+            return
+        else:
+            bot.reply_to(message, "⚠️ يرجى إرسال صورة (كبصورة Photo) أو إرسال /skip للتخطي:")
+            return
+
+    # ---- Add Tier Flow ----
+    if action == "add_tier_label":
+        if len(text) < 2 or len(text) > 100:
+            bot.reply_to(message, "⚠️ اسم الباقة يجب أن يكون بين 2 و 100 حرف. أرسل مرة أخرى:")
+            return
+        prod_key = state.get("prod_key")
+        admin_action_states[admin_id] = {
+            "action": "add_tier_prices",
+            "prod_key": prod_key,
+            "tier_label": text
+        }
+        bot.reply_to(
+            message,
+            f"✅ اسم الباقة: <b>{text}</b>\n\n"
+            "أرسل الآن الأسعار بالتنسيق التالي:\n"
+            "<code>سعر_العميل, سعر_التاجر, سعر_الصديق</code>\n\n"
+            "مثال: <code>300ج, 250ج, 220ج</code>\n\n"
+            "أو أرسل /cancel للإلغاء:"
+        )
+        return
+
+    if action == "add_tier_prices":
+        prod_key = state.get("prod_key")
+        tier_label = state.get("tier_label", "باقة جديدة")
+        parts = [p.strip() for p in text.split(",")]
+        if len(parts) < 3:
+            bot.reply_to(message, "⚠️ يرجى إرسال 3 أسعار مفصولين بفاصلة:\n<code>سعر_العميل, سعر_التاجر, سعر_الصديق</code>")
+            return
+
+        retail_price = parts[0].strip()
+        reseller_price = parts[1].strip()
+        friend_price = parts[2].strip()
+
+        if not retail_price.endswith("ج"):
+            retail_price += "ج"
+        if not reseller_price.endswith("ج"):
+            reseller_price += "ج"
+        if not friend_price.endswith("ج"):
+            friend_price += "ج"
+
+        store = get_store_data()
+        prod = store.get(prod_key)
+        if not prod:
+            admin_action_states.pop(admin_id, None)
+            bot.reply_to(message, "⚠️ المنتج غير موجود. ربما تم حذفه.")
+            return
+
+        # Generate unique tier ID
+        existing_ids = {p["id"] for p in prod.get("packages", [])}
+        base_id = prod_key + "_custom"
+        counter = 1
+        tier_id = f"{base_id}_{counter}"
+        while tier_id in existing_ids:
+            counter += 1
+            tier_id = f"{base_id}_{counter}"
+
+        new_package = {
+            "id": tier_id,
+            "label": tier_label,
+            "retail_price": retail_price,
+            "reseller_price": reseller_price,
+            "friend_price": friend_price,
+            "requires_email": False,
+            "desc": "",
+            "available": True
+        }
+
+        if "packages" not in prod:
+            prod["packages"] = []
+        prod["packages"].append(new_package)
+        update_store_data(store)
+
+        admin_action_states.pop(admin_id, None)
+        bot.reply_to(
+            message,
+            f"✅ تم إضافة الباقة بنجاح!\n\n"
+            f"📦 المنتج: <b>{prod['name']}</b>\n"
+            f"🏷️ الباقة: <b>{tier_label}</b>\n"
+            f"🆔 المفتاح: <code>{tier_id}</code>\n"
+            f"💰 سعر العميل: <b>{retail_price}</b>\n"
+            f"💼 سعر التاجر: <b>{reseller_price}</b>\n"
+            f"🤝 سعر الصديق: <b>{friend_price}</b>\n\n"
+            f"📊 إجمالي باقات المنتج: <b>{len(prod['packages'])}</b>"
+        )
         return
 
 # ================= Entry Point =================
