@@ -70,6 +70,33 @@ def safe_callback(func):
     wrapper.__name__ = func.__name__
     return wrapper
 
+def safe_edit_message_text(call, text, reply_markup=None):
+    """
+    Safely edit a message text, handling:
+    - "message is not modified" errors (ignored silently)
+    - Photo→text transitions (delete old, send new)
+    """
+    try:
+        bot.edit_message_text(
+            text,
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=reply_markup
+        )
+    except Exception as e:
+        error_str = str(e).lower()
+        if "message is not modified" in error_str:
+            return  # Content unchanged, ignore silently
+        # Photo→text transition or other edit failure: delete old message, send new
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        try:
+            bot.send_message(call.message.chat.id, text, reply_markup=reply_markup)
+        except Exception as send_err:
+            print(f"Error sending fallback message: {send_err}")
+
 # ================= Database Helpers =================
 @contextmanager
 def database_connection():
@@ -635,18 +662,17 @@ def handle_my_orders(message):
 @bot.callback_query_handler(func=lambda c: c.data == "back_to_products")
 @safe_callback
 def handle_back_to_products_callback(call):
+    bot.answer_callback_query(call.id)
     user_id = call.from_user.id
     role = get_user_role(user_id)
     badge = role_badge_display(role)
-    bot.edit_message_text(
+    safe_edit_message_text(
+        call,
         f"🛍 <b>قائمة المنتجات المتاحة</b>\n"
         f"حسابك: <b>{badge}</b>\n\n"
         "اضغط على أي منتج لعرض باقاته وتفاصيل الشراء:",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
         reply_markup=build_products_inline_menu(user_id)
     )
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("prod_"))
 @safe_callback
@@ -1517,13 +1543,12 @@ def handle_admin_panel(message):
 def handle_adm_back_to_main(call):
     if call.from_user.id != ADMIN_ID:
         return
-    bot.edit_message_text(
+    bot.answer_callback_query(call.id)
+    safe_edit_message_text(
+        call,
         "🛠 <b>لوحة تحكم وإدارة المتجر (Admin Dashboard)</b>\n\nاختر من الأقسام التالية:",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
         reply_markup=build_admin_main_keyboard()
     )
-    bot.answer_callback_query(call.id)
 
 # 1. Pending orders review
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_pending")
@@ -1531,6 +1556,7 @@ def handle_adm_back_to_main(call):
 def handle_adm_view_pending(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     with database_connection() as conn:
         pending = conn.execute("""
             SELECT * FROM payment_requests WHERE status = 'awaiting_admin' ORDER BY id ASC LIMIT 10
@@ -1539,14 +1565,12 @@ def handle_adm_view_pending(call):
     if not pending:
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-        bot.edit_message_text("✅ لا توجد أي اشتراكات معلقة حالياً! جميع الطلبات تم التعامل معها.", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-        bot.answer_callback_query(call.id)
+        safe_edit_message_text(call, "✅ لا توجد أي اشتراكات معلقة حالياً! جميع الطلبات تم التعامل معها.", reply_markup=markup)
         return
 
     bot.send_message(call.message.chat.id, f"📋 يوجد <b>{len(pending)}</b> طلب معلق قيد المراجعة:")
     for row in pending:
         notify_admins_new_order(row["id"])
-    bot.answer_callback_query(call.id)
 
 # 2. Sales Statistics
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_stats")
@@ -1554,6 +1578,7 @@ def handle_adm_view_pending(call):
 def handle_adm_view_stats(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     with database_connection() as conn:
         accepted = conn.execute("SELECT * FROM payment_requests WHERE status = 'accepted'").fetchall()
 
@@ -1584,8 +1609,7 @@ def handle_adm_view_stats(call):
     )
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main"))
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 # 3. Roles Management
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_roles")
@@ -1593,6 +1617,7 @@ def handle_adm_view_stats(call):
 def handle_adm_view_roles(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     roles = get_user_roles()
     resellers = [f"• ID: <code>{uid}</code> | {info.get('name')} (@{info.get('username', 'بدون')})" for uid, info in roles.items() if info.get("role") == "reseller"]
     friends = [f"• ID: <code>{uid}</code> | {info.get('name')} (@{info.get('username', 'بدون')})" for uid, info in roles.items() if info.get("role") == "friend"]
@@ -1615,8 +1640,7 @@ def handle_adm_view_roles(call):
         types.InlineKeyboardButton("➖ سحب رتبة (إرجاع كعميل)", callback_data="adm_role_set_customer")
     )
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_role_set_"))
 @safe_callback
@@ -1639,24 +1663,25 @@ def handle_adm_role_prompt(call):
 def handle_adm_edit_prices_select_prod(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     store = get_store_data()
     markup = types.InlineKeyboardMarkup(row_width=2)
     btns = [types.InlineKeyboardButton(p["name"], callback_data=f"adm_price_prod_{k}") for k, p in store.items()]
     markup.add(*btns)
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text("🏷 <b>تعديل الأسعار الثلاثية</b>\nاختر المنتج الذي ترغب في تعديل أسعار باقاته:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, "🏷 <b>تعديل الأسعار الثلاثية</b>\nاختر المنتج الذي ترغب في تعديل أسعار باقاته:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_price_prod_"))
 @safe_callback
 def handle_adm_edit_prices_select_pkg(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     prod_key = call.data.replace("adm_price_prod_", "")
     store = get_store_data()
     prod = store.get(prod_key)
     if not prod:
-        bot.answer_callback_query(call.id, "المنتج غير موجود.")
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
         return
 
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -1664,20 +1689,20 @@ def handle_adm_edit_prices_select_pkg(call):
         text = f"{pkg['label']} | ع:{pkg.get('retail_price')} ت:{pkg.get('reseller_price')} ص:{pkg.get('friend_price')}"
         markup.add(types.InlineKeyboardButton(text, callback_data=f"adm_pkg_tier_{prod_key}_{pkg['id']}"))
     markup.add(types.InlineKeyboardButton("🔙 رجوع للمنتجات", callback_data="adm_edit_prices"))
-    bot.edit_message_text(f"اختر الباقة المراد تعديل أسعارها في <b>{prod['name']}</b>:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, f"اختر الباقة المراد تعديل أسعارها في <b>{prod['name']}</b>:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_pkg_tier_"))
 @safe_callback
 def handle_adm_choose_price_tier(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     _, _, _, prod_key, pkg_id = call.data.split("_", 4)
     store = get_store_data()
     prod = store.get(prod_key)
     pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
     if not pkg:
-        bot.answer_callback_query(call.id, "الباقة غير موجودة.")
+        bot.answer_callback_query(call.id, "الباقة غير موجودة.", show_alert=True)
         return
 
     text = (
@@ -1694,8 +1719,7 @@ def handle_adm_choose_price_tier(call):
         types.InlineKeyboardButton("🤝 تعديل سعر الصديق (Friend)", callback_data=f"adm_setprice_{prod_key}_{pkg_id}_friend_price"),
         types.InlineKeyboardButton("🔙 رجوع للباقات", callback_data=f"adm_price_prod_{prod_key}")
     )
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_setprice_"))
 @safe_callback
@@ -1723,6 +1747,7 @@ def handle_adm_setprice_prompt(call):
 def handle_adm_view_coupons(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     coupons = get_coupons()
     lines = []
     for code, c in coupons.items():
@@ -1746,8 +1771,7 @@ def handle_adm_view_coupons(call):
         types.InlineKeyboardButton("🗑 حذف كوبون", callback_data="adm_coupon_delete")
     )
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_coupon_create")
 @safe_callback
@@ -1769,6 +1793,7 @@ def handle_adm_coupon_create_prompt(call):
 def handle_adm_coupon_delete_prompt(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     coupons = get_coupons()
     if not coupons:
         bot.answer_callback_query(call.id, "لا توجد كوبونات لحذفها.", show_alert=True)
@@ -1777,8 +1802,7 @@ def handle_adm_coupon_delete_prompt(call):
     btns = [types.InlineKeyboardButton(f"❌ {c}", callback_data=f"adm_del_coup_{c}") for c in coupons]
     markup.add(*btns)
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_view_coupons"))
-    bot.edit_message_text("اختر الكوبون المراد حذفه نهائياً:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, "اختر الكوبون المراد حذفه نهائياً:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_coup_"))
 @safe_callback
@@ -1791,6 +1815,7 @@ def handle_adm_confirm_delete_coupon(call):
         del coupons[code]
         update_coupons(coupons)
     bot.answer_callback_query(call.id, f"تم حذف الكوبون {code}")
+    # Reuse the view handler to refresh the list (it will answer callback again, but that's fine)
     handle_adm_view_coupons(call)
 
 # ================= Coupon Product Selection Callbacks =================
@@ -1973,17 +1998,16 @@ def format_coupon_detailed_report(code, c):
 def handle_adm_coupon_stats_menu(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     coupons = get_coupons()
     if not coupons:
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main"))
-        bot.edit_message_text(
+        safe_edit_message_text(
+            call,
             "📊 <b>إحصائيات واستخدام الكوبونات</b>\n\nلا توجد أي كوبونات مسجلة في النظام حالياً.",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
             reply_markup=markup
         )
-        bot.answer_callback_query(call.id)
         return
 
     total_coupons = len(coupons)
@@ -2020,19 +2044,14 @@ def handle_adm_coupon_stats_menu(call):
         "━━━━━━━━━━━━━━━━━━━\n"
         "👇 <b>اختر كود الكوبون لعرض تفاصيل عملياته الدقيقة:</b>"
     )
-    bot.edit_message_text(
-        overview_text,
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
-        reply_markup=markup
-    )
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, overview_text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cpstat_") and c.data != "adm_cpstat_all")
 @safe_callback
 def handle_adm_single_coupon_detail(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     code = call.data.replace("adm_cpstat_", "")
     coupons = get_coupons()
     c = coupons.get(code)
@@ -2047,16 +2066,16 @@ def handle_adm_single_coupon_detail(call):
     )
 
     send_chunked_messages(call.message.chat.id, report_text, reply_markup=markup)
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_cpstat_all")
 @safe_callback
 def handle_adm_all_coupons_report(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     coupons = get_coupons()
     if not coupons:
-        bot.answer_callback_query(call.id, "لا توجد كوبونات مسجلة.")
+        bot.answer_callback_query(call.id, "لا توجد كوبونات مسجلة.", show_alert=True)
         return
 
     full_reports = []
@@ -2071,7 +2090,6 @@ def handle_adm_all_coupons_report(call):
     markup.add(types.InlineKeyboardButton("🔙 رجوع لإحصائيات الكوبونات", callback_data="adm_coupon_stats"))
 
     send_chunked_messages(call.message.chat.id, full_text, reply_markup=markup)
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_export_coupons")
 @safe_callback
@@ -2197,14 +2215,14 @@ def generate_customer_report(user_id=None, username=None):
 def handle_adm_toggle_products_view(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     store = get_store_data()
     markup = types.InlineKeyboardMarkup(row_width=1)
     for k, p in store.items():
         status = "✅ متوفر" if p.get("available", True) else "❌ غير متوفر"
         markup.add(types.InlineKeyboardButton(f"{status} - {p['name']}", callback_data=f"adm_tog_{k}"))
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text("اضغط على أي منتج لتغيير حالة توفره الفوري:", chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, "اضغط على أي منتج لتغيير حالة توفره الفوري:", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_tog_"))
 @safe_callback
@@ -2217,6 +2235,7 @@ def handle_adm_toggle_product_status(call):
         store[prod_key]["available"] = not store[prod_key].get("available", True)
         update_store_data(store)
     bot.answer_callback_query(call.id, "تم تحديث حالة المنتج")
+    # Reuse the view handler to refresh the list
     handle_adm_toggle_products_view(call)
 
 # 7.1 Product Description Editing
@@ -2225,6 +2244,7 @@ def handle_adm_toggle_product_status(call):
 def handle_adm_edit_descriptions_view(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     store = get_store_data()
     markup = types.InlineKeyboardMarkup(row_width=1)
     for k, p in store.items():
@@ -2234,13 +2254,11 @@ def handle_adm_edit_descriptions_view(call):
             callback_data=f"adm_edit_desc_{k}"
         ))
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text(
+    safe_edit_message_text(
+        call,
         "✏️ <b>تعديل وصف المنتجات</b>\n\nاختر المنتج الذي ترغب في تعديل وصفه:",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
         reply_markup=markup
     )
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_edit_desc_"))
 @safe_callback
@@ -2270,6 +2288,7 @@ def handle_adm_edit_desc_prompt(call):
 def handle_adm_manage_photos_view(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     store = get_store_data()
     markup = types.InlineKeyboardMarkup(row_width=1)
     for k, p in store.items():
@@ -2279,15 +2298,13 @@ def handle_adm_manage_photos_view(call):
             callback_data=f"adm_photo_{k}"
         ))
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
-    bot.edit_message_text(
+    safe_edit_message_text(
+        call,
         "🖼️ <b>إدارة صور المنتجات</b>\n\n"
         "اختر المنتج الذي ترغب في إضافة أو تعديل صورته:\n"
         "🖼️ = صورة موجودة | 📷 = بدون صورة",
-        chat_id=call.message.chat.id,
-        message_id=call.message.message_id,
         reply_markup=markup
     )
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_photo_"))
 @safe_callback
@@ -2355,6 +2372,7 @@ def handle_adm_delete_product_photo(call):
 def handle_adm_view_notifications(call):
     if call.from_user.id != ADMIN_ID:
         return
+    bot.answer_callback_query(call.id)
     with database_connection() as conn:
         total_logs = conn.execute("SELECT COUNT(*) AS c FROM notifications_log").fetchone()["c"]
         recent = conn.execute("""
@@ -2382,8 +2400,7 @@ def handle_adm_view_notifications(call):
         types.InlineKeyboardButton("📨 إرسال إشعار فوري لمستخدم محدد", callback_data="adm_send_user_alert"),
         types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main")
     )
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda c: c.data == "adm_test_alert")
 @safe_callback
