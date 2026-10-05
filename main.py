@@ -430,6 +430,16 @@ def build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=
         packages = [p for p in packages if p.get("subcategory") == selected_subcat]
 
     for pkg in packages:
+        if not pkg.get("available", True):
+            label = pkg["label"]
+            if prod_key == "chatgpt" and pkg["id"] == "biz_remaining":
+                days, end_date = get_chatgpt_business_info()
+                label = f"الأيام المتبقية ({days} يوم حتى {end_date})"
+            markup.add(types.InlineKeyboardButton(
+                f"🔴 {label} (غير متوفر حالياً)",
+                callback_data=f"pkg_unavailable_{prod_key}_{pkg['id']}"
+            ))
+            continue
         price_info = get_package_price_for_user(pkg, user_id)
         label = pkg["label"]
         if prod_key == "chatgpt" and pkg["id"] == "biz_remaining":
@@ -987,8 +997,44 @@ def show_payment_instructions(user_id, state, chat_id):
 def handle_receipt_photo(message):
     user_id = message.from_user.id
 
-    # Admin product photo upload
+    # Admin broadcast photo
     admin_state = admin_action_states.get(user_id)
+    if admin_state and admin_state.get("action") in ("broadcast_text", "broadcast_photo") and user_id == ADMIN_ID:
+        admin_action_states.pop(user_id, None)
+        photo_id = message.photo[-1].file_id
+        caption = message.caption or ""
+
+        # Get all user IDs from database
+        user_ids = set()
+        with database_connection() as conn:
+            rows = conn.execute("SELECT DISTINCT user_id FROM payment_requests").fetchall()
+            for row in rows:
+                user_ids.add(row["user_id"])
+        # Also add from user_roles
+        roles = get_user_roles()
+        for uid in roles.keys():
+            if uid.isdigit():
+                user_ids.add(int(uid))
+
+        sent_count = 0
+        failed_count = 0
+        for uid in user_ids:
+            try:
+                bot.send_photo(uid, photo_id, caption=caption, parse_mode="HTML")
+                sent_count += 1
+            except Exception:
+                failed_count += 1
+
+        bot.reply_to(
+            message,
+            f"📊 <b>تقرير الإذاعة الجماعية (صورة)</b>\n\n"
+            f"✅ تم الإرسال بنجاح: <b>{sent_count}</b> مستخدم\n"
+            f"❌ فشل الإرسال: <b>{failed_count}</b> مستخدم\n"
+            f"👥 إجمالي المحاولات: <b>{sent_count + failed_count}</b>"
+        )
+        return
+
+    # Admin product photo upload
     if admin_state and admin_state.get("action") == "update_product_photo" and user_id == ADMIN_ID:
         prod_key = admin_state["prod_key"]
         admin_action_states.pop(user_id, None)
@@ -1519,7 +1565,11 @@ def build_admin_main_keyboard():
         types.InlineKeyboardButton("✏️ تعديل وصف المنتجات", callback_data="adm_edit_descriptions")
     )
     markup.add(
-        types.InlineKeyboardButton("🖼️ إضافة/تعديل صورة المنتج", callback_data="adm_manage_photos")
+        types.InlineKeyboardButton("🖼️ إضافة/تعديل صورة المنتج", callback_data="adm_manage_photos"),
+        types.InlineKeyboardButton("🎛️ توفر الباقات الفردية", callback_data="adm_tier_availability")
+    )
+    markup.add(
+        types.InlineKeyboardButton("📢 إذاعة جماعية", callback_data="adm_broadcast")
     )
     return markup
 
@@ -2440,6 +2490,125 @@ def handle_notification_my_orders(call):
     handle_my_orders(call.message)
     bot.answer_callback_query(call.id)
 
+# ================= Unavailable Package Handler =================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pkg_unavailable_"))
+@safe_callback
+def handle_unavailable_package_click(call):
+    bot.answer_callback_query(call.id, "⚠️ عذراً، هذه الباقة غير متوفرة حالياً. يرجى اختيار باقة أخرى.", show_alert=True)
+
+# ================= Granular Tier Availability Management =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_tier_availability")
+@safe_callback
+def handle_adm_tier_availability_view(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    store = get_store_data()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for k, p in store.items():
+        markup.add(types.InlineKeyboardButton(
+            f"📦 {p['name']}",
+            callback_data=f"adm_tier_prod_{k}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
+    safe_edit_message_text(
+        call,
+        "🎛️ <b>إدارة توفر الباقات الفردية</b>\n\nاختر المنتج للتحكم في توفر كل باقة على حدة:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_tier_prod_"))
+@safe_callback
+def handle_adm_tier_select_product(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    prod_key = call.data.replace("adm_tier_prod_", "")
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for pkg in prod.get("packages", []):
+        status = "🟢" if pkg.get("available", True) else "🔴"
+        avail_text = "متوفر" if pkg.get("available", True) else "غير متوفر"
+        markup.add(types.InlineKeyboardButton(
+            f"{status} {pkg['label']} — {avail_text}",
+            callback_data=f"adm_tier_toggle_{prod_key}_{pkg['id']}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_tier_availability"))
+    safe_edit_message_text(
+        call,
+        f"🎛️ <b>توفر باقات:</b> <b>{prod['name']}</b>\n\n"
+        "🟢 = متوفر | 🔴 = غير متوفر\n"
+        "اضغط على أي باقة لتغيير حالتها:",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_tier_toggle_"))
+@safe_callback
+def handle_adm_tier_toggle(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    parts = call.data.replace("adm_tier_toggle_", "").split("_", 1)
+    prod_key = parts[0]
+    pkg_id = parts[1]
+
+    store = get_store_data()
+    prod = store.get(prod_key)
+    if not prod:
+        bot.answer_callback_query(call.id, "المنتج غير موجود.", show_alert=True)
+        return
+
+    pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
+    if not pkg:
+        bot.answer_callback_query(call.id, "الباقة غير موجودة.", show_alert=True)
+        return
+
+    pkg["available"] = not pkg.get("available", True)
+    update_store_data(store)
+
+    new_status = "متوفرة ✅" if pkg["available"] else "غير متوفرة ❌"
+    bot.answer_callback_query(call.id, f"تم تحديث حالة الباقة إلى: {new_status}")
+
+    # Refresh the view
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for p in prod.get("packages", []):
+        status = "🟢" if p.get("available", True) else "🔴"
+        avail_text = "متوفر" if p.get("available", True) else "غير متوفر"
+        markup.add(types.InlineKeyboardButton(
+            f"{status} {p['label']} — {avail_text}",
+            callback_data=f"adm_tier_toggle_{prod_key}_{p['id']}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_tier_availability"))
+    safe_edit_message_text(
+        call,
+        f"🎛️ <b>توفر باقات:</b> <b>{prod['name']}</b>\n\n"
+        "🟢 = متوفر | 🔴 = غير متوفر\n"
+        "اضغط على أي باقة لتغيير حالتها:",
+        reply_markup=markup
+    )
+
+# ================= Broadcast / Mass Messaging =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_broadcast")
+@safe_callback
+def handle_adm_broadcast_prompt(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    admin_action_states[call.from_user.id] = {"action": "broadcast_text"}
+    bot.send_message(
+        call.message.chat.id,
+        "📢 <b>الإذاعة الجماعية</b>\n\n"
+        "أرسل الآن نص الرسالة التي تريد إرسالها لجميع المستخدمين المسجلين.\n\n"
+        "💡 يمكنك إرسال:\n"
+        "• نص عادي\n"
+        "• صورة مع تعليق (أرسل الصورة مباشرة)\n\n"
+        "أو أرسل /cancel للإلغاء:"
+    )
+    bot.answer_callback_query(call.id)
+
 # ================= Admin Text Input Router =================
 def handle_admin_text_inputs(message):
     admin_id = message.from_user.id
@@ -2591,6 +2760,42 @@ def handle_admin_text_inputs(message):
             bot.reply_to(message, f"✅ تم إرسال التنبيه الفوري بنجاح إلى المستخدم <code>{target_uid}</code>!")
         else:
             bot.reply_to(message, f"❌ تعذر إرسال التنبيه إلى <code>{target_uid}</code> (قد يكون المستخدم لم يبدأ البوت بعد).")
+        return
+
+    if action == "broadcast_text":
+        admin_action_states.pop(admin_id, None)
+        if not text:
+            bot.reply_to(message, "⚠️ النص فارغ. يرجى إرسال نص الرسالة.")
+            return
+
+        # Get all user IDs from database
+        user_ids = set()
+        with database_connection() as conn:
+            rows = conn.execute("SELECT DISTINCT user_id FROM payment_requests").fetchall()
+            for row in rows:
+                user_ids.add(row["user_id"])
+        # Also add from user_roles
+        roles = get_user_roles()
+        for uid in roles.keys():
+            if uid.isdigit():
+                user_ids.add(int(uid))
+
+        sent_count = 0
+        failed_count = 0
+        for uid in user_ids:
+            try:
+                bot.send_message(uid, text, parse_mode="HTML")
+                sent_count += 1
+            except Exception:
+                failed_count += 1
+
+        bot.reply_to(
+            message,
+            f"📊 <b>تقرير الإذاعة الجماعية (نص)</b>\n\n"
+            f"✅ تم الإرسال بنجاح: <b>{sent_count}</b> مستخدم\n"
+            f"❌ فشل الإرسال: <b>{failed_count}</b> مستخدم\n"
+            f"👥 إجمالي المحاولات: <b>{sent_count + failed_count}</b>"
+        )
         return
 
 # ================= Entry Point =================
