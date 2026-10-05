@@ -20,6 +20,7 @@ import string
 import sqlite3
 import datetime
 import threading
+import traceback
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 
@@ -47,6 +48,7 @@ STORE_DATA_PATH = os.path.join(BASE_DIR, "store_data.json")
 USER_ROLES_PATH = os.path.join(BASE_DIR, "user_roles.json")
 RESELLERS_PATH = os.path.join(BASE_DIR, "resellers.json")
 COUPONS_PATH = os.path.join(BASE_DIR, "coupons.json")
+WAITLIST_PATH = os.path.join(BASE_DIR, "waitlist.json")
 
 _db_lock = threading.RLock()
 _store_lock = threading.RLock()
@@ -63,6 +65,7 @@ def safe_callback(func):
             func(call)
         except Exception as e:
             print(f"Error in callback handler {func.__name__}: {e}")
+            traceback.print_exc()
             try:
                 bot.answer_callback_query(call.id, "❌ حدث خطأ غير متوقع، يرجى المحاولة لاحقاً.", show_alert=True)
             except Exception:
@@ -277,6 +280,16 @@ def update_coupons(coupons):
     with _coupons_lock:
         save_json_file(COUPONS_PATH, coupons)
 
+_waitlist_lock = threading.RLock()
+
+def get_waitlist():
+    with _waitlist_lock:
+        return load_json_file(WAITLIST_PATH, dict)
+
+def update_waitlist(waitlist):
+    with _waitlist_lock:
+        save_json_file(WAITLIST_PATH, waitlist)
+
 # ================= User Roles and Pricing =================
 # Roles: 'customer' (عميل), 'reseller' (تاجر), 'friend' (صديق), 'admin' (أدمن)
 def get_user_role(user_id):
@@ -486,7 +499,32 @@ def build_coupon_product_selection_keyboard(admin_id):
         ))
     all_mark = "✅ " if selected == [] else "☐ "
     markup.add(types.InlineKeyboardButton(f"{all_mark}الكل (جميع المنتجات)", callback_data="adm_cpn_sel_all"))
+    markup.add(types.InlineKeyboardButton("➡️ التالي: اختيار الباقات", callback_data="adm_cpn_to_tiers"))
+    return markup
+
+def build_coupon_tier_selection_keyboard(admin_id):
+    state = admin_action_states.get(admin_id, {})
+    selected_products = state.get("selected_products", [])
+    selected_tiers = state.get("selected_tiers", [])
+    store = get_store_data()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+
+    # If no products selected, show all
+    products_to_show = store if not selected_products else {k: v for k, v in store.items() if k in selected_products}
+
+    for prod_key, prod in products_to_show.items():
+        for pkg in prod.get("packages", []):
+            tier_key = f"{prod_key}_{pkg['id']}"
+            prefix = "✅ " if tier_key in selected_tiers else "☐ "
+            markup.add(types.InlineKeyboardButton(
+                f"{prefix}{prod['name']} — {pkg['label']}",
+                callback_data=f"adm_cpn_tier_{tier_key}"
+            ))
+
+    all_mark = "✅ " if not selected_tiers else "☐ "
+    markup.add(types.InlineKeyboardButton(f"{all_mark}الكل (جميع الباقات)", callback_data="adm_cpn_tier_all"))
     markup.add(types.InlineKeyboardButton("✅ تأكيد وإنشاء الكوبون", callback_data="adm_cpn_confirm"))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع للمنتجات", callback_data="adm_cpn_back_to_products"))
     return markup
 
 # ================= Order Lifecycle & State Management =================
@@ -628,7 +666,34 @@ def handle_support(message):
         bot.send_message(message.chat.id, support_text, reply_markup=markup)
     except Exception as e:
         print(f"Error in support handler: {e}")
+        traceback.print_exc()
         bot.send_message(message.chat.id, "⚠️ حدث خطأ في عرض معلومات الدعم الفني. يرجى المحاولة لاحقاً.")
+
+@bot.callback_query_handler(func=lambda c: c.data == "support")
+@safe_callback
+def handle_support_callback(call):
+    try:
+        support_text = (
+            "🛠 <b>مركز المساعدة والدعم الفني | GoPro Store Team</b>\n\n"
+            "فريقنا متواجد دائماً لمساعدتك:\n\n"
+            f"📱 <b>واتساب:</b> <code>{SUPPORT_WHATSAPP}</code>\n"
+            f"✈️ <b>تيليجرام:</b> {SUPPORT_TELEGRAM}\n"
+            "⏰ مواعيد العمل: متواجدون على مدار 24 ساعة."
+        )
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("💬 مراسلة واتساب", url=f"https://wa.me/2{SUPPORT_WHATSAPP}"),
+            types.InlineKeyboardButton("✈️ مراسلة تيليجرام", url="https://t.me/gopro_store_team")
+        )
+        bot.answer_callback_query(call.id)
+        bot.send_message(call.message.chat.id, support_text, reply_markup=markup)
+    except Exception as e:
+        print(f"Error in support callback: {e}")
+        traceback.print_exc()
+        try:
+            bot.answer_callback_query(call.id, "❌ حدث خطأ. يرجى المحاولة لاحقاً.", show_alert=True)
+        except Exception:
+            pass
 
 @bot.message_handler(func=lambda msg: msg.text == "📦 سجل مشترياتي")
 def handle_my_orders(message):
@@ -687,25 +752,46 @@ def handle_back_to_products_callback(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("prod_"))
 @safe_callback
 def handle_product_click(call):
-    user_id = call.from_user.id
-    prod_key = call.data.replace("prod_", "")
-    store = get_store_data()
-    prod = store.get(prod_key)
-    if not prod:
-        bot.answer_callback_query(call.id, "المنتج غير موجود!", show_alert=True)
-        return
+    try:
+        user_id = call.from_user.id
+        prod_key = call.data.replace("prod_", "")
+        store = get_store_data()
+        prod = store.get(prod_key)
+        if not prod:
+            bot.answer_callback_query(call.id, "المنتج غير موجود!", show_alert=True)
+            return
 
-    if not prod.get("available", True):
-        bot.answer_callback_query(call.id, "⚠️ نعتذر، هذا المنتج غير متوفر حالياً.", show_alert=True)
-        return
+        if not prod.get("available", True):
+            bot.answer_callback_query(call.id, "⚠️ نعتذر، هذا المنتج غير متوفر حالياً.", show_alert=True)
+            return
 
-    # Check if product has subcategories (like ChatGPT)
-    subcategories = prod.get("subcategories")
-    if subcategories:
+        # Check if product has subcategories (like ChatGPT)
+        subcategories = prod.get("subcategories")
+        if subcategories:
+            desc = (
+                f"<b>{prod['name']}</b>\n\n"
+                f"{prod.get('description', '')}\n\n"
+                "👇 اختر القسم المطلوب:"
+            )
+            markup = build_subcategories_or_packages_keyboard(prod_key, user_id)
+            if prod.get("photo"):
+                try:
+                    bot.send_photo(call.message.chat.id, prod["photo"], caption=desc, reply_markup=markup)
+                    bot.delete_message(call.message.chat.id, call.message.message_id)
+                    bot.answer_callback_query(call.id)
+                    return
+                except Exception as photo_err:
+                    print(f"Error sending product photo for {prod_key}: {photo_err}")
+                    traceback.print_exc()
+            bot.edit_message_text(desc, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
+            bot.answer_callback_query(call.id)
+            return
+
+        # Product has direct packages
         desc = (
             f"<b>{prod['name']}</b>\n\n"
             f"{prod.get('description', '')}\n\n"
-            "👇 اختر القسم المطلوب:"
+            "👇 اختر الباقة المناسبة:"
         )
         markup = build_subcategories_or_packages_keyboard(prod_key, user_id)
         if prod.get("photo"):
@@ -714,105 +800,114 @@ def handle_product_click(call):
                 bot.delete_message(call.message.chat.id, call.message.message_id)
                 bot.answer_callback_query(call.id)
                 return
-            except Exception:
-                pass
+            except Exception as photo_err:
+                print(f"Error sending product photo for {prod_key}: {photo_err}")
+                traceback.print_exc()
         bot.edit_message_text(desc, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
         bot.answer_callback_query(call.id)
-        return
-
-    # Product has direct packages
-    desc = (
-        f"<b>{prod['name']}</b>\n\n"
-        f"{prod.get('description', '')}\n\n"
-        "👇 اختر الباقة المناسبة:"
-    )
-    markup = build_subcategories_or_packages_keyboard(prod_key, user_id)
-    if prod.get("photo"):
+    except Exception as e:
+        print(f"Critical error in handle_product_click: {e}")
+        traceback.print_exc()
         try:
-            bot.send_photo(call.message.chat.id, prod["photo"], caption=desc, reply_markup=markup)
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-            bot.answer_callback_query(call.id)
-            return
+            bot.answer_callback_query(call.id, "❌ حدث خطأ في تحميل المنتج. يرجى المحاولة لاحقاً.", show_alert=True)
         except Exception:
             pass
-    bot.edit_message_text(desc, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("subcat_"))
 @safe_callback
 def handle_subcategory_click(call):
-    user_id = call.from_user.id
-    parts = call.data.split("_", 2)
-    prod_key = parts[1]
-    subcat_id = parts[2]
-    store = get_store_data()
-    prod = store.get(prod_key)
-    if not prod:
-        bot.answer_callback_query(call.id, "المنتج غير موجود.")
-        return
-
-    subcat = next((s for s in prod.get("subcategories", []) if s["id"] == subcat_id), None)
-    subcat_name = subcat["name"] if subcat else "الباقات المتاحة"
-    subcat_desc = subcat.get("description", "") if subcat else ""
-
-    text = f"<b>{prod['name']}</b> — <b>{subcat_name}</b>\n\n{subcat_desc}\n\n👇 اختر الباقة المطلوبة:"
-    markup = build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=subcat_id)
-    bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("pkg_"))
-@safe_callback
-def handle_package_view(call):
-    user_id = call.from_user.id
-    _, prod_key, pkg_id = call.data.split("_", 2)
-    store = get_store_data()
-    prod = store.get(prod_key)
-    if not prod:
-        bot.answer_callback_query(call.id, "المنتج غير موجود.")
-        return
-
-    pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
-    if not pkg:
-        bot.answer_callback_query(call.id, "الباقة غير موجودة.")
-        return
-
-    price_info = get_package_price_for_user(pkg, user_id)
-    photo_to_send = pkg.get("photo") or prod.get("photo")
-
-    label = pkg["label"]
-    extra_info = ""
-    if prod_key == "chatgpt" and pkg["id"] == "biz_remaining":
-        days, end_date = get_chatgpt_business_info()
-        extra_info = f"\n📅 التجديد يوم 23 من كل شهر\n⏳ متبقي في الدورة الحالية: {days} يوم (حتى {end_date})"
-
-    email_notice = "\n📧 <i>تنويه: هذه الباقة تتطلب إدخال بريدك الإلكتروني للتفعيل المباشر.</i>" if pkg.get("requires_email") else ""
-
-    caption = (
-        f"🛍 <b>{prod['name']}</b>\n"
-        f"📦 الباقة: <b>{label}</b>\n\n"
-        f"💰 <b>{price_info['display']}</b>\n"
-        f"{extra_info}\n"
-        f"📝 <b>الوصف والضمان:</b>\n{pkg.get('desc', '')}\n"
-        f"{email_notice}"
-    )
-
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("💳 شراء الآن", callback_data=f"buy_{prod_key}_{pkg_id}"),
-        types.InlineKeyboardButton("🔙 رجوع", callback_data=f"prod_{prod_key}")
-    )
-
-    if photo_to_send:
-        try:
-            bot.send_photo(call.message.chat.id, photo_to_send, caption=caption, reply_markup=markup)
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-            bot.answer_callback_query(call.id)
+    try:
+        user_id = call.from_user.id
+        parts = call.data.split("_", 2)
+        if len(parts) < 3:
+            bot.answer_callback_query(call.id, "خطأ في بيانات الطلب.", show_alert=True)
             return
+        prod_key = parts[1]
+        subcat_id = parts[2]
+        store = get_store_data()
+        prod = store.get(prod_key)
+        if not prod:
+            bot.answer_callback_query(call.id, "المنتج غير موجود.")
+            return
+
+        subcat = next((s for s in prod.get("subcategories", []) if s["id"] == subcat_id), None)
+        subcat_name = subcat["name"] if subcat else "الباقات المتاحة"
+        subcat_desc = subcat.get("description", "") if subcat else ""
+
+        text = f"<b>{prod['name']}</b> — <b>{subcat_name}</b>\n\n{subcat_desc}\n\n👇 اختر الباقة المطلوبة:"
+        markup = build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=subcat_id)
+        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"Error in handle_subcategory_click: {e}")
+        traceback.print_exc()
+        try:
+            bot.answer_callback_query(call.id, "❌ حدث خطأ في تحميل الباقات.", show_alert=True)
         except Exception:
             pass
 
-    bot.edit_message_text(caption, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
-    bot.answer_callback_query(call.id)
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pkg_") and not c.data.startswith("pkg_unavailable_"))
+@safe_callback
+def handle_package_view(call):
+    try:
+        user_id = call.from_user.id
+        _, prod_key, pkg_id = call.data.split("_", 2)
+        store = get_store_data()
+        prod = store.get(prod_key)
+        if not prod:
+            bot.answer_callback_query(call.id, "المنتج غير موجود.")
+            return
+
+        pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
+        if not pkg:
+            bot.answer_callback_query(call.id, "الباقة غير موجودة.")
+            return
+
+        price_info = get_package_price_for_user(pkg, user_id)
+        photo_to_send = pkg.get("photo") or prod.get("photo")
+
+        label = pkg["label"]
+        extra_info = ""
+        if prod_key == "chatgpt" and pkg["id"] == "biz_remaining":
+            days, end_date = get_chatgpt_business_info()
+            extra_info = f"\n📅 التجديد يوم 23 من كل شهر\n⏳ متبقي في الدورة الحالية: {days} يوم (حتى {end_date})"
+
+        email_notice = "\n📧 <i>تنويه: هذه الباقة تتطلب إدخال بريدك الإلكتروني للتفعيل المباشر.</i>" if pkg.get("requires_email") else ""
+
+        caption = (
+            f"🛍 <b>{prod['name']}</b>\n"
+            f"📦 الباقة: <b>{label}</b>\n\n"
+            f"💰 <b>{price_info['display']}</b>\n"
+            f"{extra_info}\n"
+            f"📝 <b>الوصف والضمان:</b>\n{pkg.get('desc', '')}\n"
+            f"{email_notice}"
+        )
+
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("💳 شراء الآن", callback_data=f"buy_{prod_key}_{pkg_id}"),
+            types.InlineKeyboardButton("🔙 رجوع", callback_data=f"prod_{prod_key}")
+        )
+
+        if photo_to_send:
+            try:
+                bot.send_photo(call.message.chat.id, photo_to_send, caption=caption, reply_markup=markup)
+                bot.delete_message(call.message.chat.id, call.message.message_id)
+                bot.answer_callback_query(call.id)
+                return
+            except Exception as photo_err:
+                print(f"Error sending package photo for {prod_key}/{pkg_id}: {photo_err}")
+                traceback.print_exc()
+
+        bot.edit_message_text(caption, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
+        bot.answer_callback_query(call.id)
+    except Exception as e:
+        print(f"Critical error in handle_package_view: {e}")
+        traceback.print_exc()
+        try:
+            bot.answer_callback_query(call.id, "❌ حدث خطأ في تحميل تفاصيل الباقة.", show_alert=True)
+        except Exception:
+            pass
 
 # ================= Purchase Flow =================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("buy_"))
@@ -941,6 +1036,14 @@ def apply_coupon_to_order(user_id, state, code, chat_id):
     if applicable_products and state.get("product_key") not in applicable_products:
         bot.send_message(chat_id, "⚠️ عذراً، هذا الكوبون غير متاح لهذا المنتج!\nأرسل كود آخر أو /skip للمتابعة.")
         return
+
+    # Check tier-level restrictions
+    applicable_tiers = coupon.get("applicable_tiers")
+    if applicable_tiers:
+        current_tier_key = f"{state.get('product_key')}_{state.get('package_key')}"
+        if current_tier_key not in applicable_tiers:
+            bot.send_message(chat_id, "⚠️ عذراً، هذا الكوبون غير متاح لهذه الباقة!\nأرسل كود آخر أو /skip للمتابعة.")
+            return
 
     # Calculate discount
     pkg_key = state.get("package_key")
@@ -1607,6 +1710,9 @@ def build_admin_main_keyboard():
         types.InlineKeyboardButton("➕ إضافة باقة جديدة", callback_data="adm_add_tier"),
         types.InlineKeyboardButton("🗑️ حذف باقة", callback_data="adm_delete_tier")
     )
+    markup.add(
+        types.InlineKeyboardButton("📋 قائمة الانتظار (Waitlist)", callback_data="adm_view_waitlist")
+    )
     return markup
 
 @bot.message_handler(func=lambda msg: msg.text == "🛠 لوحة الإدارة")
@@ -1839,14 +1945,19 @@ def handle_adm_view_coupons(call):
     for code, c in coupons.items():
         status = "✅ نشط" if c.get("active", True) else "❌ معطل"
         applicable = c.get("applicable_products")
+        applicable_tiers = c.get("applicable_tiers")
         if applicable:
             scope = f"📦 {', '.join(applicable)}"
         else:
             scope = "📦 جميع المنتجات"
+        if applicable_tiers:
+            tier_scope = f"🏷️ {len(applicable_tiers)} باقة محددة"
+        else:
+            tier_scope = "🏷️ جميع الباقات"
         lines.append(
             f"🎟 <b>{code}</b> ({c.get('influencer', 'بدون')}) - {status}\n"
             f"   استخدامات: {c.get('used_count', 0)} / {c.get('max_uses', 'غير محدود')} | خصم ثابت: {c.get('fixed_discount', 0)}ج\n"
-            f"   {scope}"
+            f"   {scope} | {tier_scope}"
         )
     coupons_text = "\n\n".join(lines) if lines else "لا توجد كوبونات منشأة حالياً."
 
@@ -1947,6 +2058,84 @@ def handle_adm_cpn_toggle_product(call):
     )
     bot.answer_callback_query(call.id)
 
+@bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_to_tiers")
+@safe_callback
+def handle_adm_cpn_to_tiers(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    state["selected_tiers"] = []
+    admin_action_states[call.from_user.id] = state
+    bot.answer_callback_query(call.id)
+    safe_edit_message_text(
+        call,
+        "🏷️ <b>اختيار الباقات (اختياري)</b>\n\n"
+        "يمكنك اختيار باقات محددة لتقييد الكوبون عليها، أو اضغط <b>الكل</b> لجميع الباقات:\n\n"
+        "💡 إذا لم تختر أي باقة، سيطبق الكوبون على جميع الباقات في المنتجات المحددة.",
+        reply_markup=build_coupon_tier_selection_keyboard(call.from_user.id)
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_back_to_products")
+@safe_callback
+def handle_adm_cpn_back_to_products(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    bot.answer_callback_query(call.id)
+    safe_edit_message_text(
+        call,
+        "📦 <b>اختر المنتجات التي ينطبق عليها الكوبون:</b>",
+        reply_markup=build_coupon_product_selection_keyboard(call.from_user.id)
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_tier_all")
+@safe_callback
+def handle_adm_cpn_tier_select_all(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    state["selected_tiers"] = []
+    admin_action_states[call.from_user.id] = state
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=build_coupon_tier_selection_keyboard(call.from_user.id)
+    )
+    bot.answer_callback_query(call.id, "تم اختيار جميع الباقات")
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cpn_tier_") and c.data not in ("adm_cpn_tier_all",))
+@safe_callback
+def handle_adm_cpn_toggle_tier(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    state = admin_action_states.get(call.from_user.id)
+    if not state or state.get("action") != "create_coupon_step2":
+        bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+    tier_key = call.data.replace("adm_cpn_tier_", "")
+    selected_tiers = state.get("selected_tiers", [])
+    if tier_key in selected_tiers:
+        selected_tiers.remove(tier_key)
+    else:
+        selected_tiers.append(tier_key)
+    state["selected_tiers"] = selected_tiers
+    admin_action_states[call.from_user.id] = state
+    bot.edit_message_reply_markup(
+        chat_id=call.message.chat.id,
+        message_id=call.message.message_id,
+        reply_markup=build_coupon_tier_selection_keyboard(call.from_user.id)
+    )
+    bot.answer_callback_query(call.id)
+
 @bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_confirm")
 @safe_callback
 def handle_adm_cpn_confirm_creation(call):
@@ -1962,6 +2151,7 @@ def handle_adm_cpn_confirm_creation(call):
     influencer = state["influencer"]
     discount = state["discount"]
     selected = state.get("selected_products", [])
+    selected_tiers = state.get("selected_tiers", [])
     applicable = selected if selected else []
 
     coupons = get_coupons()
@@ -1979,6 +2169,8 @@ def handle_adm_cpn_confirm_creation(call):
     }
     if applicable:
         coupons[code]["applicable_products"] = applicable
+    if selected_tiers:
+        coupons[code]["applicable_tiers"] = selected_tiers
     update_coupons(coupons)
 
     if applicable:
@@ -1987,11 +2179,28 @@ def handle_adm_cpn_confirm_creation(call):
     else:
         scope_msg = "📦 ينطبق على: <b>جميع المنتجات</b>"
 
+    if selected_tiers:
+        tiers_display = []
+        store = get_store_data()
+        for tier_key in selected_tiers:
+            parts = tier_key.split("_", 1)
+            if len(parts) == 2:
+                p_key, p_id = parts
+                prod = store.get(p_key)
+                pkg = next((p for p in prod.get("packages", []) if p["id"] == p_id), None) if prod else None
+                if prod and pkg:
+                    tiers_display.append(f"{prod['name']} — {pkg['label']}")
+        tiers_label = "\n".join([f"  • {t}" for t in tiers_display])
+        tier_msg = f"\n🏷️ <b>الباقات المحددة:</b>\n{tiers_label}"
+    else:
+        tier_msg = "\n🏷️ ينطبق على: <b>جميع الباقات</b>"
+
     bot.edit_message_text(
         f"✅ تم إنشاء الكوبون <b>{code}</b> بنجاح!\n"
         f"🏷 برعاية: <b>{influencer}</b>\n"
         f"✂️ قيمة الخصم: <b>{discount}ج</b>\n"
-        f"{scope_msg}",
+        f"{scope_msg}"
+        f"{tier_msg}",
         chat_id=call.message.chat.id,
         message_id=call.message.message_id
     )
@@ -2064,12 +2273,32 @@ def format_coupon_detailed_report(code, c):
     else:
         scope_str = "📦 <b>ينطبق على:</b> جميع المنتجات\n"
 
+    applicable_tiers = c.get("applicable_tiers")
+    if applicable_tiers:
+        store = get_store_data()
+        tiers_display = []
+        for tier_key in applicable_tiers:
+            parts = tier_key.split("_", 1)
+            if len(parts) == 2:
+                p_key, p_id = parts
+                prod = store.get(p_key)
+                pkg = next((p for p in prod.get("packages", []) if p["id"] == p_id), None) if prod else None
+                if prod and pkg:
+                    tiers_display.append(f"{prod['name']} — {pkg['label']}")
+        if tiers_display:
+            tier_str = f"🏷️ <b>الباقات المحددة:</b> {', '.join(tiers_display)}\n"
+        else:
+            tier_str = "🏷️ <b>ينطبق على:</b> جميع الباقات\n"
+    else:
+        tier_str = "🏷️ <b>ينطبق على:</b> جميع الباقات\n"
+
     report = (
         f"🎟 <b>تقرير الكوبون:</b> <code>{code}</code>\n"
         f"🏷 <b>المؤثر / الجهة:</b> <b>{c.get('influencer', 'عام')}</b>\n"
         f"📌 <b>الحالة:</b> {status_str}\n"
         f"✂️ <b>قيمة الكوبون:</b> {val_str}\n"
         f"{scope_str}"
+        f"{tier_str}"
         f"📊 <b>إجمالي مرات الاستخدام:</b> {used_count} من {c.get('max_uses', 'غير محدود')}\n"
         f"💰 <b>إجمالي الخصم الممنوح:</b> {format_currency(total_discount)}\n"
         f"💵 <b>إجمالي المبيعات المحققة منه:</b> {format_currency(total_revenue)}\n"
@@ -2530,7 +2759,112 @@ def handle_notification_my_orders(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pkg_unavailable_"))
 @safe_callback
 def handle_unavailable_package_click(call):
-    bot.answer_callback_query(call.id, "⚠️ عذراً، هذه الباقة غير متوفرة حالياً. يرجى اختيار باقة أخرى.", show_alert=True)
+    try:
+        parts = call.data.replace("pkg_unavailable_", "").split("_", 1)
+        if len(parts) < 2:
+            bot.answer_callback_query(call.id, "⚠️ عذراً، هذه الباقة غير متوفرة حالياً.", show_alert=True)
+            return
+        prod_key = parts[0]
+        pkg_id = parts[1]
+        store = get_store_data()
+        prod = store.get(prod_key)
+        pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None) if prod else None
+        label = pkg["label"] if pkg else "الباقة"
+
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("🔔 احجز / أبلغني عند التوفر", callback_data=f"waitlist_{prod_key}_{pkg_id}"),
+            types.InlineKeyboardButton("🔙 رجوع", callback_data=f"prod_{prod_key}")
+        )
+        bot.answer_callback_query(call.id)
+        safe_edit_message_text(
+            call,
+            f"⚠️ <b>{label}</b> غير متوفرة حالياً.\n\n"
+            "يمكنك الضغط على زر <b>🔔 احجز / أبلغني</b> وسيتم إشعارك فور توفرها!",
+            reply_markup=markup
+        )
+    except Exception as e:
+        print(f"Error in handle_unavailable_package_click: {e}")
+        traceback.print_exc()
+        try:
+            bot.answer_callback_query(call.id, "⚠️ عذراً، هذه الباقة غير متوفرة حالياً.", show_alert=True)
+        except Exception:
+            pass
+
+# ================= Waitlist / Backorder Handler =================
+@bot.callback_query_handler(func=lambda c: c.data.startswith("waitlist_"))
+@safe_callback
+def handle_waitlist_request(call):
+    try:
+        user_id = call.from_user.id
+        parts = call.data.replace("waitlist_", "").split("_", 1)
+        if len(parts) < 2:
+            bot.answer_callback_query(call.id, "خطأ في البيانات.", show_alert=True)
+            return
+        prod_key = parts[0]
+        pkg_id = parts[1]
+
+        store = get_store_data()
+        prod = store.get(prod_key)
+        pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None) if prod else None
+        label = pkg["label"] if pkg else "الباقة"
+        prod_name = prod["name"] if prod else prod_key
+
+        waitlist = get_waitlist()
+        wl_key = f"{prod_key}_{pkg_id}"
+        if wl_key not in waitlist:
+            waitlist[wl_key] = []
+
+        # Check if user already in waitlist
+        if any(entry.get("user_id") == user_id for entry in waitlist[wl_key]):
+            bot.answer_callback_query(call.id, "✅ أنت مسجل بالفعل في قائمة الانتظار لهذه الباقة!", show_alert=True)
+            return
+
+        customer = call.from_user
+        waitlist[wl_key].append({
+            "user_id": user_id,
+            "username": customer.username or "",
+            "first_name": customer.first_name or "",
+            "added_at": utc_now()
+        })
+        update_waitlist(waitlist)
+
+        bot.answer_callback_query(call.id, "✅ تم تسجيلك في قائمة الانتظار بنجاح!", show_alert=True)
+
+        # Notify user
+        try:
+            bot.send_message(
+                user_id,
+                f"✅ <b>تم تسجيلك في قائمة الانتظار</b>\n\n"
+                f"📦 المنتج: <b>{prod_name}</b>\n"
+                f"🏷️ الباقة: <b>{label}</b>\n\n"
+                "سيتم إشعارك فور توفر هذه الباقة! 🔔"
+            )
+        except Exception:
+            pass
+
+        # Notify admin about demand
+        demand_count = len(waitlist[wl_key])
+        admin_msg = (
+            f"🔔 <b>طلب حجز جديد على قائمة الانتظار</b>\n\n"
+            f"📦 المنتج: <b>{prod_name}</b>\n"
+            f"🏷️ الباقة: <b>{label}</b>\n"
+            f"👤 العميل: @{customer.username or 'بدون'} (ID: <code>{user_id}</code>)\n"
+            f"📊 إجمالي المنتظرين: <b>{demand_count}</b> شخص"
+        )
+        send_instant_notification(
+            ADMIN_ID,
+            admin_msg,
+            notification_type="waitlist_request",
+            loud=False
+        )
+    except Exception as e:
+        print(f"Error in handle_waitlist_request: {e}")
+        traceback.print_exc()
+        try:
+            bot.answer_callback_query(call.id, "❌ حدث خطأ. يرجى المحاولة لاحقاً.", show_alert=True)
+        except Exception:
+            pass
 
 # ================= Granular Tier Availability Management =================
 @bot.callback_query_handler(func=lambda c: c.data == "adm_tier_availability")
@@ -2896,6 +3230,131 @@ def handle_adm_delete_tier_execute(call):
         f"📊 عدد الباقات المتبقية: <b>{remaining}</b>",
         reply_markup=types.InlineKeyboardMarkup().add(
             types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main")
+        )
+    )
+
+# ================= Waitlist Management =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_view_waitlist")
+@safe_callback
+def handle_adm_view_waitlist(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    waitlist = get_waitlist()
+    if not waitlist:
+        safe_edit_message_text(
+            call,
+            "📋 <b>قائمة الانتظار</b>\n\nلا يوجد أي طلبات حجز حالياً.",
+            reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main")
+            )
+        )
+        return
+
+    store = get_store_data()
+    lines = []
+    for wl_key, entries in waitlist.items():
+        if not entries:
+            continue
+        parts = wl_key.split("_", 1)
+        if len(parts) == 2:
+            p_key, p_id = parts
+            prod = store.get(p_key)
+            pkg = next((p for p in prod.get("packages", []) if p["id"] == p_id), None) if prod else None
+            label = f"{prod['name']} — {pkg['label']}" if prod and pkg else wl_key
+        else:
+            label = wl_key
+        lines.append(f"🔴 <b>{label}</b>: {len(entries)} منتظرين")
+
+    text = "📋 <b>قائمة الانتظار (Waitlist)</b>\n\n" + "\n".join(lines)
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("📢 إشعار جميع المنتظرين (تحديث المخزون)", callback_data="adm_notify_waitlist"))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
+    safe_edit_message_text(call, text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_notify_waitlist")
+@safe_callback
+def handle_adm_notify_waitlist_prompt(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    bot.answer_callback_query(call.id)
+    waitlist = get_waitlist()
+    if not waitlist:
+        bot.answer_callback_query(call.id, "لا يوجد طلبات حجز.", show_alert=True)
+        return
+
+    store = get_store_data()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for wl_key, entries in waitlist.items():
+        if not entries:
+            continue
+        parts = wl_key.split("_", 1)
+        if len(parts) == 2:
+            p_key, p_id = parts
+            prod = store.get(p_key)
+            pkg = next((p for p in prod.get("packages", []) if p["id"] == p_id), None) if prod else None
+            label = f"{prod['name']} — {pkg['label']}" if prod and pkg else wl_key
+        else:
+            label = wl_key
+        markup.add(types.InlineKeyboardButton(
+            f"📢 إشعار {len(entries)} منتظرين — {label}",
+            callback_data=f"adm_notify_wl_{wl_key}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_view_waitlist"))
+    safe_edit_message_text(call, "📢 <b>اختر الباقة التي تريد إشعار منتظريها:</b>", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_notify_wl_"))
+@safe_callback
+def handle_adm_notify_waitlist_execute(call):
+    if call.from_user.id != ADMIN_ID:
+        return
+    wl_key = call.data.replace("adm_notify_wl_", "")
+    waitlist = get_waitlist()
+    entries = waitlist.get(wl_key, [])
+    if not entries:
+        bot.answer_callback_query(call.id, "لا يوجد منتظرين لهذه الباقة.", show_alert=True)
+        return
+
+    store = get_store_data()
+    parts = wl_key.split("_", 1)
+    if len(parts) == 2:
+        p_key, p_id = parts
+        prod = store.get(p_key)
+        pkg = next((p for p in prod.get("packages", []) if p["id"] == p_id), None) if prod else None
+        label = f"{prod['name']} — {pkg['label']}" if prod and pkg else wl_key
+    else:
+        label = wl_key
+
+    sent_count = 0
+    for entry in entries:
+        try:
+            bot.send_message(
+                entry["user_id"],
+                f"🎉 <b>خبر سار! الباقة أصبحت متوفرة الآن!</b>\n\n"
+                f"📦 <b>{label}</b>\n\n"
+                "💳 يمكنك الآن الشراء مباشرة من المتجر!\n"
+                "👇 اضغط على زر تصفح المنتجات للبدء:",
+                reply_markup=types.InlineKeyboardMarkup().add(
+                    types.InlineKeyboardButton("🛍 تصفح المنتجات", callback_data="back_to_products")
+                )
+            )
+            sent_count += 1
+        except Exception:
+            pass
+
+    # Clear the waitlist for this product/tier
+    waitlist[wl_key] = []
+    update_waitlist(waitlist)
+
+    bot.answer_callback_query(call.id, f"تم إشعار {sent_count} مستخدم بنجاح!", show_alert=True)
+    safe_edit_message_text(
+        call,
+        f"✅ <b>تم إشعار المنتظرين بنجاح!</b>\n\n"
+        f"📦 الباقة: <b>{label}</b>\n"
+        f"👥 تم إشعار: <b>{sent_count}</b> من <b>{len(entries)}</b>\n\n"
+        "تم مسح قائمة الانتظار لهذه الباقة.",
+        reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_view_waitlist")
         )
     )
 
