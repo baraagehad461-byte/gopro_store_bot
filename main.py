@@ -33,8 +33,19 @@ except ImportError:
     def keep_alive():
         pass
 
+# تحميل متغيرات البيئة من ملف .env إن وُجد (اختياري)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ================= Configuration =================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8891794386:AAGsDFvqhE-2OogWcbXDKhKQYnwTdB5Okho")
+# ⚠️ ممنوع وضع توكن البوت داخل الكود — لازم يجي من متغير البيئة BOT_TOKEN.
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN environment variable is required.")
+
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5152178321"))
 VODAFONE_CASH = os.getenv("VODAFONE_CASH", "01060348550")
 SUPPORT_WHATSAPP = "01220146907"
