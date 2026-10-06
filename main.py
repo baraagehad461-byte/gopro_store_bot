@@ -33,8 +33,19 @@ except ImportError:
     def keep_alive():
         pass
 
+# تحميل متغيرات البيئة من ملف .env إن وُجد (اختياري)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ================= Configuration =================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8891794386:AAGsDFvqhE-2OogWcbXDKhKQYnwTdB5Okho")
+# ⚠️ ممنوع وضع توكن البوت داخل الكود — لازم يجي من متغير البيئة BOT_TOKEN.
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN environment variable is required.")
+
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5152178321"))
 VODAFONE_CASH = os.getenv("VODAFONE_CASH", "01060348550")
 SUPPORT_WHATSAPP = "01220146907"
@@ -1841,8 +1852,8 @@ def notify_admins_new_order(request_id):
         f"🔢 <b>الكمية:</b> {row['quantity']}\n"
         f"💵 <b>سعر القطعة:</b> {row['unit_price']}\n"
         + (f"🎟 <b>الكوبون:</b> {row['coupon_code']} (خصم: {row['discount_amount']})\n" if row['coupon_code'] else "")
-        + (f"🪙 <b>خصم المحفظة (معلق):</b> {format_currency(Decimal(str(row['wallet_used']))}\n" if row['wallet_used'] and float(row['wallet_used']) > 0 else "")
-        + (f"🎁 <b>كاش باك مؤهل عند القبول:</b> {format_currency(Decimal(str(row['cashback_earned']))}\n" if row['cashback_earned'] and float(row['cashback_earned']) > 0 else "")
+        + (f"🪙 <b>خصم المحفظة (معلق):</b> {format_currency(Decimal(str(row['wallet_used'])))}\n" if row['wallet_used'] and float(row['wallet_used']) > 0 else "")
+        + (f"🎁 <b>كاش باك مؤهل عند القبول:</b> {format_currency(Decimal(str(row['cashback_earned'])))}\n" if row['cashback_earned'] and float(row['cashback_earned']) > 0 else "")
         + f"💰 <b>الإجمالي المطلوب تحويله:</b> <b>{row['total_amount']}</b>\n"
         f"📱 <b>رقم المحول منه:</b> <code>{row['phone_number']}</code>\n"
         + (f"📧 <b>إيميل التفعيل:</b> <code>{row['customer_email']}</code>\n" if row['customer_email'] else "") +
