@@ -33,8 +33,19 @@ except ImportError:
     def keep_alive():
         pass
 
+# تحميل متغيرات البيئة من ملف .env إن وُجد (اختياري)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # ================= Configuration =================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8891794386:AAGsDFvqhE-2OogWcbXDKhKQYnwTdB5Okho")
+# ⚠️ ممنوع وضع توكن البوت داخل الكود — لازم يجي من متغير البيئة BOT_TOKEN.
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN environment variable is required.")
+
 ADMIN_ID = int(os.getenv("ADMIN_ID", "5152178321"))
 VODAFONE_CASH = os.getenv("VODAFONE_CASH", "01060348550")
 SUPPORT_WHATSAPP = "01220146907"
@@ -165,38 +176,7 @@ def generate_order_ref():
     chars = "".join(random.choices(string.digits, k=5))
     return f"ORD-{chars}"
 
-def initialize_database()
-
-# ================= User Tracking & Profile Helpers =================
-def save_or_update_user(user_id, username=None, first_name=None, last_name=None):
-    if not user_id:
-        return
-    now_str = utc_now()
-    clean_username = username.lstrip("@").lower() if username else None
-    try:
-        with database_connection() as conn:
-            conn.execute("""
-                INSERT INTO users (user_id, username, first_name, last_name, date_joined, last_active)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    username = COALESCE(excluded.username, users.username),
-                    first_name = COALESCE(excluded.first_name, users.first_name),
-                    last_name = COALESCE(excluded.last_name, users.last_name),
-                    last_active = excluded.last_active
-            """, (user_id, clean_username, first_name, last_name, now_str, now_str))
-    except Exception as e:
-        print(f"Error in save_or_update_user: {e}")
-
-def track_user_activity(from_user):
-    if not from_user:
-        return
-    save_or_update_user(
-        user_id=from_user.id,
-        username=getattr(from_user, 'username', None),
-        first_name=getattr(from_user, 'first_name', None),
-        last_name=getattr(from_user, 'last_name', None)
-    )
-:
+def initialize_database():
     with database_connection() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("""
@@ -341,6 +321,37 @@ def track_user_activity(from_user):
         user_states.clear()
         user_states.update(states)
 
+
+
+# ================= User Tracking & Profile Helpers =================
+def save_or_update_user(user_id, username=None, first_name=None, last_name=None):
+    if not user_id:
+        return
+    now_str = utc_now()
+    clean_username = username.lstrip("@").lower() if username else None
+    try:
+        with database_connection() as conn:
+            conn.execute("""
+                INSERT INTO users (user_id, username, first_name, last_name, date_joined, last_active)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = COALESCE(excluded.username, users.username),
+                    first_name = COALESCE(excluded.first_name, users.first_name),
+                    last_name = COALESCE(excluded.last_name, users.last_name),
+                    last_active = excluded.last_active
+            """, (user_id, clean_username, first_name, last_name, now_str, now_str))
+    except Exception as e:
+        print(f"Error in save_or_update_user: {e}")
+
+def track_user_activity(from_user):
+    if not from_user:
+        return
+    save_or_update_user(
+        user_id=from_user.id,
+        username=getattr(from_user, 'username', None),
+        first_name=getattr(from_user, 'first_name', None),
+        last_name=getattr(from_user, 'last_name', None)
+    )
 initialize_database()
 
 # ================= Storage & JSON Helpers =================

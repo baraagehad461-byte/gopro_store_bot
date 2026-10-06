@@ -1,0 +1,24 @@
+# الأسرار ومتغيرات البيئة
+.env
+.env.local
+.env.*.local
+
+# ملفات بايثون المؤقتة
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# بيئات افتراضية
+.venv/
+venv/
+env/
+
+# Node
+node_modules/
+dist/
+
+# محررات ونظام
+.vscode/
+.idea/
+.DS_Store
