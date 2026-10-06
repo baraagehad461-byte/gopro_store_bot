@@ -67,6 +67,7 @@ def safe_callback(func):
     def wrapper(call):
         try:
             user_id = call.from_user.id
+            track_user_activity(call.from_user)
             if call.data != "check_join" and not is_admin(user_id) and not is_user_subscribed(user_id):
                 try:
                     bot.answer_callback_query(call.id, "⚠️ يجب الاشتراك في جروب المتجر أولاً للاستمرار!", show_alert=True)
@@ -164,7 +165,38 @@ def generate_order_ref():
     chars = "".join(random.choices(string.digits, k=5))
     return f"ORD-{chars}"
 
-def initialize_database():
+def initialize_database()
+
+# ================= User Tracking & Profile Helpers =================
+def save_or_update_user(user_id, username=None, first_name=None, last_name=None):
+    if not user_id:
+        return
+    now_str = utc_now()
+    clean_username = username.lstrip("@").lower() if username else None
+    try:
+        with database_connection() as conn:
+            conn.execute("""
+                INSERT INTO users (user_id, username, first_name, last_name, date_joined, last_active)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = COALESCE(excluded.username, users.username),
+                    first_name = COALESCE(excluded.first_name, users.first_name),
+                    last_name = COALESCE(excluded.last_name, users.last_name),
+                    last_active = excluded.last_active
+            """, (user_id, clean_username, first_name, last_name, now_str, now_str))
+    except Exception as e:
+        print(f"Error in save_or_update_user: {e}")
+
+def track_user_activity(from_user):
+    if not from_user:
+        return
+    save_or_update_user(
+        user_id=from_user.id,
+        username=getattr(from_user, 'username', None),
+        first_name=getattr(from_user, 'first_name', None),
+        last_name=getattr(from_user, 'last_name', None)
+    )
+:
     with database_connection() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("""
@@ -274,6 +306,18 @@ def initialize_database():
                 updated_at TEXT NOT NULL
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                date_joined TEXT NOT NULL,
+                last_active TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)")
 
         conn.execute("""
             CREATE TABLE IF NOT EXISTS wallet_transactions (
@@ -466,17 +510,15 @@ def is_user_subscribed(user_id):
 def get_force_join_markup():
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton("📢 انضم إلى الجروب الرسمي", url=REQUIRED_GROUP_URL),
-        types.InlineKeyboardButton("🔄 تحقق من الانضمام", callback_data="check_join")
+        types.InlineKeyboardButton("📢 انضمام إلى الجروب", url=REQUIRED_GROUP_URL),
+        types.InlineKeyboardButton("✅ تحقق من الاشتراك", callback_data="check_join")
     )
     return markup
 
 def send_force_join_message(chat_id):
     text = (
-        "⚠️ <b>تنبيه: يجب الانضمام إلى جروب المتجر أولاً!</b>\n\n"
-        "للاستفادة من خدمات البوت وتصفح العروض والمنتجات والشراء، يرجى الانضمام إلى جروبنا الرسمي على تليجرام:\n"
-        f"🔗 <a href=\"{REQUIRED_GROUP_URL}\">اضغط هنا للانضمام إلى الجروب</a>\n\n"
-        "بعد الانضمام، اضغط على زر <b>🔄 تحقق من الانضمام</b> أدناه 👇"
+        "⚠️ <b>عذراً عزيزي، يجب عليك أولاً الانضمام إلى جروب المتجر الرسمي لتتمكن من استخدام البوت والاستفادة من خدماتنا!</b>\n\n"
+        "👇 انضم الآن ثم اضغط على زر التحقق بالأسفل:"
     )
     bot.send_message(chat_id, text, reply_markup=get_force_join_markup(), disable_web_page_preview=True)
 
@@ -680,9 +722,11 @@ def get_main_menu_keyboard(user_id):
     browse_btn = types.KeyboardButton("🛍 تصفح المنتجات")
     orders_btn = types.KeyboardButton("📦 سجل مشترياتي")
     wallet_btn = types.KeyboardButton("💰 محفظتي")
+    account_btn = types.KeyboardButton("👤 بيانات حسابي / ID")
     support_btn = types.KeyboardButton("💬 الدعم الفني")
     markup.add(browse_btn, orders_btn)
-    markup.add(wallet_btn, support_btn)
+    markup.add(wallet_btn, account_btn)
+    markup.add(support_btn)
     if is_admin(user_id):
         markup.add(types.KeyboardButton("🛠 لوحة الإدارة"))
     return markup
@@ -879,6 +923,7 @@ def start_new_order(user_id, prod_key, pkg_id):
 @bot.message_handler(commands=["start"])
 def handle_start(message):
     user_id = message.from_user.id
+    track_user_activity(message.from_user)
     if not is_admin(user_id) and not is_user_subscribed(user_id):
         send_force_join_message(message.chat.id)
         return
@@ -1018,10 +1063,78 @@ def format_wallet_display(user_id, user_first_name="عزيزنا العميل"):
 
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.InlineKeyboardButton("🛍 تصفح المنتجات والشراء", callback_data="back_to_products"),
+        types.InlineKeyboardButton("🛍 تصفح المنتجات", callback_data="back_to_products"),
         types.InlineKeyboardButton("🔄 تحديث الرصيد", callback_data="refresh_wallet")
     )
+    markup.add(
+        types.InlineKeyboardButton("👤 بيانات حسابي / ID", callback_data="my_account_info")
+    )
     return text, markup
+
+
+# ================= Customer Account Info / Chat ID Display =================
+def format_user_account_info(user_id, first_name=None, last_name=None, username=None):
+    bal = get_user_wallet_balance(user_id)
+    role = get_user_role(user_id)
+    role_names = {
+        "admin": "👑 مدير النظام (Admin)",
+        "reseller": "💼 تاجر معتمد (Reseller)",
+        "friend": "🤝 صديق معتمد (Friend)",
+        "customer": "👤 عميل (Customer)"
+    }
+    role_str = role_names.get(role, "عميل")
+    username_str = f"@{username}" if username else "غير محدد"
+    fn = first_name or "عزيزنا العميل"
+    ln = f" {last_name}" if last_name else ""
+    account_name = f"{fn}{ln}".strip()
+
+    text = (
+        "👤 <b>بيانات حسابك | Account Details</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"🆔 <b>معرف التليجرام الخاص بك (Chat ID):</b>\n"
+        f"<code>{user_id}</code>\n"
+        "👆 <i>(اضغط على الرقم لنسخه بنقرة واحدة)</i>\n\n"
+        f"📛 <b>اسم الحساب:</b> {account_name}\n"
+        f"🌐 <b>اسم المستخدم:</b> {username_str}\n"
+        f"💰 <b>رصيد المحفظة الحالي:</b> <b>{format_currency(bal)} EGP</b>\n"
+        f"🎖 <b>الرتبة الحالية:</b> <b>{role_str}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>يمكنك إرسال الـ Chat ID لخدمة العملاء عند الاستفسار أو تفعيل الحسابات والترقيات.</i>"
+    )
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("💰 عرض محفظتي", callback_data="refresh_wallet"),
+        types.InlineKeyboardButton("🛍 تصفح المنتجات", callback_data="back_to_products")
+    )
+    return text, markup
+
+@bot.message_handler(func=lambda msg: msg.text in ("👤 بيانات حسابي / ID", "بيانات حسابي / ID", "بيانات حسابي", "/id", "/account"))
+def handle_account_info_command(message):
+    user_id = message.from_user.id
+    track_user_activity(message.from_user)
+    if not is_admin(user_id) and not is_user_subscribed(user_id):
+        send_force_join_message(message.chat.id)
+        return
+    text, markup = format_user_account_info(
+        user_id,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        username=message.from_user.username
+    )
+    bot.send_message(message.chat.id, text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data == "my_account_info")
+@safe_callback
+def handle_my_account_info_callback(call):
+    user_id = call.from_user.id
+    bot.answer_callback_query(call.id)
+    text, markup = format_user_account_info(
+        user_id,
+        first_name=call.from_user.first_name,
+        last_name=call.from_user.last_name,
+        username=call.from_user.username
+    )
+    safe_edit_message_text(call, text, reply_markup=markup)
 
 @bot.message_handler(func=lambda msg: msg.text in ("💰 محفظتي", "/wallet", "محفظتي"))
 def handle_my_wallet(message):
@@ -1088,8 +1201,9 @@ def handle_my_orders(message):
 @bot.callback_query_handler(func=lambda c: c.data == "check_join")
 def handle_check_join_callback(call):
     user_id = call.from_user.id
+    track_user_activity(call.from_user)
     if is_user_subscribed(user_id):
-        bot.answer_callback_query(call.id, "✅ تم التحقق من اشتراكك بنجاح! أهلاً بك في المتجر.", show_alert=True)
+        bot.answer_callback_query(call.id, "✅ تم التحقق بنجاح، مرحباً بك في المتجر!", show_alert=False)
         try:
             bot.delete_message(call.message.chat.id, call.message.message_id)
         except Exception:
@@ -1111,7 +1225,7 @@ def handle_check_join_callback(call):
         )
         bot.send_message(call.message.chat.id, welcome_text, reply_markup=get_main_menu_keyboard(user_id))
     else:
-        bot.answer_callback_query(call.id, "❌ لم يتم العثور على اشتراكك في الجروب بعد! يرجى الانضمام أولاً ثم إعادة المحاولة.", show_alert=True)
+        bot.answer_callback_query(call.id, "❌ لم تقم بالانضمام بعد! يرجى الانضمام للجروب أولاً", show_alert=True)
 
 # ================= Inline Callbacks: Product & Package Browsing =================
 @bot.callback_query_handler(func=lambda c: c.data == "back_to_products")
@@ -1132,10 +1246,11 @@ def handle_back_to_products_callback(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("prod_"))
 @safe_callback
 def handle_product_click(call):
+    bot.answer_callback_query(call.id)
     try:
         user_id = call.from_user.id
         prod_key = call.data.replace("prod_", "")
-        store = get_store_data()
+        store = get_store_data() or {}
         prod = store.get(prod_key)
         if not prod:
             bot.answer_callback_query(call.id, "المنتج غير موجود!", show_alert=True)
@@ -1196,6 +1311,7 @@ def handle_product_click(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("subcat_"))
 @safe_callback
 def handle_subcategory_click(call):
+    bot.answer_callback_query(call.id)
     try:
         user_id = call.from_user.id
         parts = call.data.split("_", 2)
@@ -1204,20 +1320,20 @@ def handle_subcategory_click(call):
             return
         prod_key = parts[1]
         subcat_id = parts[2]
-        store = get_store_data()
+        store = get_store_data() or {}
         prod = store.get(prod_key)
         if not prod:
             bot.answer_callback_query(call.id, "المنتج غير موجود.")
             return
 
-        subcat = next((s for s in prod.get("subcategories", []) if s["id"] == subcat_id), None)
-        subcat_name = subcat["name"] if subcat else "الباقات المتاحة"
+        subcategories = prod.get("subcategories") or []
+        subcat = next((s for s in subcategories if s.get("id") == subcat_id), None)
+        subcat_name = subcat.get("name", "الباقات المتاحة") if subcat else "الباقات المتاحة"
         subcat_desc = subcat.get("description", "") if subcat else ""
 
-        text = f"<b>{prod['name']}</b> — <b>{subcat_name}</b>\n\n{subcat_desc}\n\n👇 اختر الباقة المطلوبة:"
+        text = f"<b>{prod.get('name', '')}</b> — <b>{subcat_name}</b>\n\n{subcat_desc}\n\n👇 اختر الباقة المطلوبة:"
         markup = build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=subcat_id)
         safe_edit_message_text(call, text, reply_markup=markup)
-        bot.answer_callback_query(call.id)
     except Exception as e:
         print(f"Error in handle_subcategory_click: {e}")
         traceback.print_exc()
@@ -1229,16 +1345,22 @@ def handle_subcategory_click(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pkg_") and not c.data.startswith("pkg_unavailable_"))
 @safe_callback
 def handle_package_view(call):
+    bot.answer_callback_query(call.id)
     try:
         user_id = call.from_user.id
-        _, prod_key, pkg_id = call.data.split("_", 2)
-        store = get_store_data()
+        parts = call.data.split("_", 2)
+        if len(parts) < 3:
+            bot.answer_callback_query(call.id, "خطأ في بيانات الباقة.", show_alert=True)
+            return
+        _, prod_key, pkg_id = parts
+        store = get_store_data() or {}
         prod = store.get(prod_key)
         if not prod:
             bot.answer_callback_query(call.id, "المنتج غير موجود.")
             return
 
-        pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
+        packages = prod.get("packages") or []
+        pkg = next((p for p in packages if p.get("id") == pkg_id), None)
         if not pkg:
             bot.answer_callback_query(call.id, "الباقة غير موجودة.")
             return
@@ -1246,9 +1368,9 @@ def handle_package_view(call):
         price_info = get_package_price_for_user(pkg, user_id)
         photo_to_send = pkg.get("photo") or prod.get("photo")
 
-        label = pkg["label"]
+        label = pkg.get("label", "باقة")
         extra_info = ""
-        if prod_key == "chatgpt" and pkg["id"] == "biz_remaining":
+        if prod_key == "chatgpt" and pkg_id == "biz_remaining":
             days, end_date = get_chatgpt_business_info()
             extra_info = f"\n📅 التجديد يوم 23 من كل شهر\n⏳ متبقي في الدورة الحالية: {days} يوم (حتى {end_date})"
 
@@ -1257,34 +1379,37 @@ def handle_package_view(call):
         cashback_amt = get_package_cashback(pkg)
         cashback_notice = f"\n🎁 <b>كاش باك فوري:</b> {format_currency(cashback_amt)} يُضاف لمحفظتك بعد تأكيد الطلب!\n" if cashback_amt > Decimal("0") else ""
 
+        pkg_desc = pkg.get("desc") or pkg.get("description") or ""
+
         caption = (
-            f"🛍 <b>{prod['name']}</b>\n"
+            f"🛍 <b>{prod.get('name', '')}</b>\n"
             f"📦 الباقة: <b>{label}</b>\n\n"
-            f"💰 <b>{price_info['display']}</b>\n"
+            f"💰 <b>{price_info.get('display', '')}</b>\n"
             f"{extra_info}"
             f"{cashback_notice}"
-            f"📝 <b>الوصف والضمان:</b>\n{pkg.get('desc', '')}\n"
+            f"📝 <b>الوصف والضمان:</b>\n{pkg_desc}\n"
             f"{email_notice}"
         )
+
+        subcat_id = pkg.get("subcategory")
+        back_cb = f"subcat_{prod_key}_{subcat_id}" if subcat_id else f"prod_{prod_key}"
 
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             types.InlineKeyboardButton("💳 شراء الآن", callback_data=f"buy_{prod_key}_{pkg_id}"),
-            types.InlineKeyboardButton("🔙 رجوع", callback_data=f"prod_{prod_key}")
+            types.InlineKeyboardButton("🔙 رجوع", callback_data=back_cb)
         )
 
         if photo_to_send:
             try:
                 bot.send_photo(call.message.chat.id, photo_to_send, caption=caption, reply_markup=markup)
                 bot.delete_message(call.message.chat.id, call.message.message_id)
-                bot.answer_callback_query(call.id)
                 return
             except Exception as photo_err:
                 print(f"Error sending package photo for {prod_key}/{pkg_id}: {photo_err}")
                 traceback.print_exc()
 
         safe_edit_message_text(call, caption, reply_markup=markup)
-        bot.answer_callback_query(call.id)
     except Exception as e:
         print(f"Critical error in handle_package_view: {e}")
         traceback.print_exc()
@@ -3047,75 +3172,174 @@ def handle_adm_export_coupons_file(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_lookup_customer")
 @safe_callback
 def handle_adm_lookup_customer_prompt(call):
+    bot.answer_callback_query(call.id)
     if not is_admin(call.from_user.id):
         return
     admin_action_states[call.from_user.id] = {"action": "lookup_customer"}
-    bot.send_message(
-        call.message.chat.id,
-        "🔍 <b>مراجعة بيانات العميل</b>\n\n"
-        "أرسل Telegram ID أو @username الخاص بالعميل لجلب تقريره الكامل:\n"
-        "أو أرسل /cancel للإلغاء:"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data="adm_cancel_lookup"))
+    safe_edit_message_text(
+        call,
+        "🔍 <b>يرجى إرسال ID العميل أو اسم المستخدم (Username) للبحث عن بياناته:</b>\n\n"
+        "💡 يدعم البحث برقم الـ ID مباشرة أو باسم المستخدم (مع @ أو بدونها وبأي صيغة أحرف).\n\n"
+        "أو اضغط زر الإلغاء للرجوع:",
+        reply_markup=markup
     )
-    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_cancel_lookup")
+@safe_callback
+def handle_adm_cancel_lookup(call):
+    bot.answer_callback_query(call.id, "تم الإلغاء")
+    admin_action_states.pop(call.from_user.id, None)
+    handle_adm_back_to_main(call)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cust_"))
 @safe_callback
 def handle_adm_customer_shortcut(call):
+    bot.answer_callback_query(call.id)
     if not is_admin(call.from_user.id):
         return
     target_id = int(call.data.replace("adm_cust_", ""))
-    report = generate_customer_report(target_id)
+    report, _ = generate_customer_report_detailed(target_id)
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_back_to_main"))
     bot.send_message(call.message.chat.id, report, reply_markup=markup)
-    bot.answer_callback_query(call.id)
 
-def generate_customer_report(user_id=None, username=None):
+def generate_customer_report_detailed(query):
+    query = str(query).strip()
+    target_uid = None
+    user_record = None
+
     with database_connection() as conn:
-        if user_id:
-            orders = conn.execute("SELECT * FROM payment_requests WHERE user_id = ? ORDER BY id DESC", (user_id,)).fetchall()
-        elif username:
-            clean_u = username.replace("@", "")
-            orders = conn.execute("SELECT * FROM payment_requests WHERE customer_username = ? ORDER BY id DESC", (clean_u,)).fetchall()
+        if query.isdigit():
+            target_uid = int(query)
+            user_row = conn.execute("SELECT * FROM users WHERE user_id = ?", (target_uid,)).fetchone()
+            if user_row:
+                user_record = dict(user_row)
         else:
-            return "لم يتم تحديد معيار البحث."
+            clean_u = query.lstrip("@").lower()
+            user_row = conn.execute("SELECT * FROM users WHERE LOWER(username) = ?", (clean_u,)).fetchone()
+            if user_row:
+                user_record = dict(user_row)
+                target_uid = user_record["user_id"]
 
-    if not orders and not user_id:
-        return "❌ لم يتم العثور على أي بيانات لهذا العميل في قاعدة البيانات."
+        # Fallback search in payment_requests
+        if not target_uid:
+            if query.isdigit():
+                p_row = conn.execute("SELECT * FROM payment_requests WHERE user_id = ? ORDER BY id DESC LIMIT 1", (int(query),)).fetchone()
+                if p_row:
+                    target_uid = p_row["user_id"]
+                    user_record = {
+                        "user_id": target_uid,
+                        "username": p_row["customer_username"],
+                        "first_name": p_row["customer_first_name"],
+                        "last_name": p_row["customer_last_name"],
+                        "date_joined": p_row["created_at"]
+                    }
+            else:
+                clean_u = query.lstrip("@").lower()
+                p_row = conn.execute("SELECT * FROM payment_requests WHERE LOWER(customer_username) = ? ORDER BY id DESC LIMIT 1", (clean_u,)).fetchone()
+                if p_row:
+                    target_uid = p_row["user_id"]
+                    user_record = {
+                        "user_id": target_uid,
+                        "username": p_row["customer_username"],
+                        "first_name": p_row["customer_first_name"],
+                        "last_name": p_row["customer_last_name"],
+                        "date_joined": p_row["created_at"]
+                    }
 
-    target_uid = orders[0]["user_id"] if orders else user_id
+        # Fallback search in user_roles.json
+        if not target_uid:
+            roles = get_user_roles()
+            if query.isdigit() and str(query) in roles:
+                target_uid = int(query)
+                rinfo = roles[str(query)]
+                user_record = {
+                    "user_id": target_uid,
+                    "username": rinfo.get("username"),
+                    "first_name": rinfo.get("name", "مستخدم"),
+                    "last_name": "",
+                    "date_joined": rinfo.get("updated_at", "غير مسجل")
+                }
+            else:
+                clean_u = query.lstrip("@").lower()
+                for uid_str, rinfo in roles.items():
+                    if rinfo.get("username", "").lower() == clean_u and uid_str.isdigit():
+                        target_uid = int(uid_str)
+                        user_record = {
+                            "user_id": target_uid,
+                            "username": rinfo.get("username"),
+                            "first_name": rinfo.get("name", "مستخدم"),
+                            "last_name": "",
+                            "date_joined": rinfo.get("updated_at", "غير مسجل")
+                        }
+                        break
+
+        if not target_uid:
+            return (
+                f"❌ <b>لم يتم العثور على العميل!</b>\n\n"
+                f"لم نتمكن من العثور على أي حساب مسجل بالمعرف أو اسم المستخدم: <code>{query}</code>\n"
+                f"تأكد من صحة الـ ID أو اسم المستخدم وحاول مرة أخرى.",
+                False
+            )
+
+        orders = conn.execute("SELECT * FROM payment_requests WHERE user_id = ? ORDER BY id DESC", (target_uid,)).fetchall()
+        total_orders = len(orders)
+        accepted_count = sum(1 for o in orders if o["status"] == "accepted")
+        pending_count = sum(1 for o in orders if o["status"] == "awaiting_admin")
+        rejected_count = sum(1 for o in orders if o["status"] == "rejected")
+
+        total_spent = Decimal("0")
+        for o in orders:
+            if o["status"] == "accepted":
+                amt = parse_price_amount(o["total_amount"]) or Decimal("0")
+                total_spent += amt
+
+    bal = get_user_wallet_balance(target_uid)
     role = get_user_role(target_uid)
     badge = role_badge_display(role)
 
-    total_spent = Decimal("0")
-    accepted_count = 0
-    pending_count = 0
+    first_n = user_record.get("first_name") or "عميل"
+    last_n = user_record.get("last_name") or ""
+    full_name = f"{first_n} {last_n}".strip()
+    u_name = user_record.get("username")
+    username_display = f"@{u_name}" if u_name else "غير محدد"
+    date_joined = user_record.get("date_joined", "غير مسجل")
+    if date_joined and len(date_joined) >= 10:
+        date_joined = date_joined[:10]
 
     history_lines = []
-    for o in orders[:8]:
-        if o["status"] == "accepted":
-            accepted_count += 1
-            amt = parse_price_amount(o["total_amount"]) or Decimal("0")
-            total_spent += amt
-        elif o["status"] == "awaiting_admin":
-            pending_count += 1
-        history_lines.append(f"• #{o['order_ref']} | {o['package_name']} | {o['total_amount']} | {o['status']}")
+    for o in orders[:5]:
+        st_icon = "✅" if o["status"] == "accepted" else ("⏳" if o["status"] == "awaiting_admin" else "❌")
+        history_lines.append(f"• {st_icon} #{o['order_ref']} | {o['package_name']} | {o['total_amount']}")
+    history_text = "\n".join(history_lines) if history_lines else "<i>لا توجد طلبات مسجلة حتى الآن</i>"
 
-    history_text = "\n".join(history_lines) if history_lines else "لا توجد طلبات سابقة"
-
-    name = f"{orders[0]['customer_first_name']} {orders[0]['customer_last_name'] or ''}" if orders else "غير متوفر"
-    u_tag = f"@{orders[0]['customer_username']}" if (orders and orders[0]['customer_username']) else "بدون معرف"
-
-    return (
-        f"👤 <b>تقرير العميل الشامل</b>\n\n"
-        f"🆔 <b>Telegram ID:</b> <code>{target_uid}</code>\n"
-        f"📝 <b>الاسم:</b> {name} ({u_tag})\n"
-        f"🎖 <b>الرتبة الحالية:</b> <b>{badge}</b>\n\n"
-        f"💰 <b>إجمالي ما أنفقه:</b> <b>{format_currency(total_spent)}</b>\n"
-        f"✅ <b>الطلبات المكتملة:</b> {accepted_count}\n"
-        f"⏳ <b>الطلبات المعلقة:</b> {pending_count}\n\n"
-        f"📋 <b>آخر العمليات:</b>\n{history_text}"
+    report_text = (
+        "👤 <b>بطاقة بيانات العميل الشاملة</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"📛 <b>الاسم:</b> {full_name}\n"
+        f"🆔 <b>Telegram ID:</b> <code>{target_uid}</code> <i>(اضغط للنسخ)</i>\n"
+        f"🌐 <b>اسم المستخدم:</b> {username_display}\n"
+        f"🎖 <b>الرتبة الحالية:</b> <b>{badge}</b>\n"
+        f"💰 <b>رصيد المحفظة:</b> <b>{format_currency(bal)} EGP</b>\n"
+        f"📅 <b>تاريخ الانضمام:</b> {date_joined}\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>إحصائيات الطلبات:</b>\n"
+        f"• إجمالي الطلبات: <b>{total_orders}</b>\n"
+        f"• مكتملة ومقبولة: <b>{accepted_count}</b>\n"
+        f"• معلقة قيد المراجعة: <b>{pending_count}</b>\n"
+        f"• مرفوضة / ملغاة: <b>{rejected_count}</b>\n"
+        f"💵 <b>إجمالي المشتريات:</b> <b>{format_currency(total_spent)}</b>\n"
+        "━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>آخر الطلبات:</b>\n{history_text}"
     )
+    return report_text, True
+
+def generate_customer_report(user_id=None, username=None):
+    query = str(user_id) if user_id is not None else (str(username) if username else "")
+    report, _ = generate_customer_report_detailed(query)
+    return report
 
 # 7. Product Stock Toggle
 @bot.callback_query_handler(func=lambda c: c.data == "adm_toggle_products")
@@ -4271,12 +4495,30 @@ def handle_admin_text_inputs(message):
         return
 
     if action == "lookup_customer":
+        query = text.strip()
+        if query == "/cancel":
+            admin_action_states.pop(admin_id, None)
+            bot.reply_to(message, "تم إلغاء البحث.", reply_markup=types.InlineKeyboardMarkup().add(
+                types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main")
+            ))
+            return
+
+        report, found = generate_customer_report_detailed(query)
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        if not found:
+            markup.add(
+                types.InlineKeyboardButton("🔍 بحث عن عميل آخر", callback_data="adm_lookup_customer"),
+                types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main")
+            )
+            bot.reply_to(message, report, reply_markup=markup)
+            return
+
         admin_action_states.pop(admin_id, None)
-        if text.isdigit():
-            report = generate_customer_report(user_id=int(text))
-        else:
-            report = generate_customer_report(username=text)
-        bot.send_message(message.chat.id, report)
+        markup.add(
+            types.InlineKeyboardButton("🔍 بحث جديد", callback_data="adm_lookup_customer"),
+            types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main")
+        )
+        bot.reply_to(message, report, reply_markup=markup)
         return
 
     if action == "send_custom_notification":
