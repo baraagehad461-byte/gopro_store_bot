@@ -27,7 +27,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
         "desc": "▫️ حساب ChatGPT Plus مشترك بجودة عالية وسرعة فائقة.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "plus_no_warranty",
@@ -39,7 +40,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
         "desc": "▫️ حساب ChatGPT Plus خاص بك بمفردك بدون ضمان بعد التسليم.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "plus_warranty",
@@ -51,7 +53,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
         "desc": "▫️ حساب خاص وتفعيل على حسابك الشخصي مع ضمان كامل لمدة 28 يوماً.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "biz_remaining",
@@ -63,7 +66,8 @@
         "requires_email": true,
         "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
         "desc": "▫️ ChatGPT Business للأيام المتبقية في الدورة الحالية (حتى يوم 23 من الشهر).",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "biz_1m_plus",
@@ -75,7 +79,8 @@
         "requires_email": true,
         "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
         "desc": "▫️ اشتراك Business لمدة شهر كامل مضافاً إليه الأيام المتبقية حتى دورة 23.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "biz_2m_plus",
@@ -87,7 +92,8 @@
         "requires_email": true,
         "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
         "desc": "▫️ اشتراك Business لمدة شهرين + الأيام المتبقية.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "biz_3m",
@@ -99,7 +105,8 @@
         "requires_email": true,
         "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
         "desc": "▫️ اشتراك Business لمدة 3 شهور متواصلة وتفعيل على إيميلك.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "biz_6m",
@@ -111,7 +118,8 @@
         "requires_email": true,
         "photo": "https://images.unsplash.com/photo-1677442136019-21780ecad995?w=800&auto=format&fit=crop&q=80",
         "desc": "▫️ اشتراك Business نصف سنوي بأفضل سعر وتفعيل مباشر.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       }
     ]
   },
@@ -130,7 +138,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?w=800&auto=format&fit=crop&q=80",
         "desc": "🛡 الضمان: 28 يوم | يعمل على جهاز واحد فقط بدون علامة مائية وتصدير بجودة عالية.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "capcut_1600",
@@ -141,7 +150,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?w=800&auto=format&fit=crop&q=80",
         "desc": "🛡 الضمان: 28 يوم | يحتوي على 1600 كريدتس إضافية لأدوات الذكاء الاصطناعي وتفريغ الصوت.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "capcut_6m",
@@ -152,7 +162,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1574717024653-61fd2cf4d44d?w=800&auto=format&fit=crop&q=80",
         "desc": "🛡 الضمان: 5 شهور | وصول كامل لأدوات المونتاج البرو الاحترافية لمدة نصف سنة.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       }
     ]
   },
@@ -171,7 +182,8 @@
         "requires_email": true,
         "photo": "https://images.unsplash.com/photo-1626785774573-4b799315345d?w=800&auto=format&fit=crop&q=80",
         "desc": "⏳ المدة: سنتين | تفعيل رسمي على بريدك الشخصي بدعوة فريق.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "canva_panel",
@@ -182,7 +194,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1626785774573-4b799315345d?w=800&auto=format&fit=crop&q=80",
         "desc": "🛡 الضمان: شهرين | لوحة تحكم كاملة 500 عضو لمدة 3 سنوات مع تحكم كامل بالإيميل.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       }
     ]
   },
@@ -201,7 +214,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80",
         "desc": "رابط تفعيل ذاتي بيشتغل على أي جيميل جديد أو قديم، 1000 Flow Credits وموديلات نانو بنانا برو.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "gemini_invite",
@@ -212,7 +226,8 @@
         "requires_email": true,
         "photo": "https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80",
         "desc": "📌 اشتراك جيميناي بدعوة مباشرة على بريدك الإلكتروني وتفعيل يدوي سريع بعد الدفع.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       }
     ]
   },
@@ -231,7 +246,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1581291518857-4e27b48ff24e?w=800&auto=format&fit=crop&q=80",
         "desc": "🛡 الضمان: 4 شهور | يعمل على جهازين في نفس الوقت ووصول لكافة برامج أدوبي الرسمية.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       }
     ]
   },
@@ -250,7 +266,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80",
         "desc": "100 دولار رصيد API كلود لمدة 30 يوم مع ضمان كامل.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "claude_api_500",
@@ -261,7 +278,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80",
         "desc": "500 دولار رصيد API كلود لمدة 30 يوم مع ضمان كامل.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "claude_pro",
@@ -272,7 +290,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80",
         "desc": "اشتراك كلود برو رسمي على حسابك بأعلى سرعة وحدود استخدام.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       },
       {
         "id": "claude_max",
@@ -283,7 +302,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1620712943543-bcc4688e7485?w=800&auto=format&fit=crop&q=80",
         "desc": "اشتراك ماكس 5x كلود للمطورين والشركات مع أعلى سعة استيعابية.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       }
     ]
   },
@@ -302,7 +322,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1611162617213-7d7a39e9b1d7?w=800&auto=format&fit=crop&q=80",
         "desc": "رابط Gift Link رسمي لمدة 3 شهور مع ضمان 60 يوم.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       }
     ]
   },
@@ -321,7 +342,8 @@
         "requires_email": false,
         "photo": "https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=800&auto=format&fit=crop&q=80",
         "desc": "5 كريدتس يومياً + 300 كريدتس إضافية لمرة واحدة لمدة 12 شهر.",
-        "available": true
+        "available": true,
+        "cashback": "0ج"
       }
     ]
   }

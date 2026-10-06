@@ -49,11 +49,13 @@ USER_ROLES_PATH = os.path.join(BASE_DIR, "user_roles.json")
 RESELLERS_PATH = os.path.join(BASE_DIR, "resellers.json")
 COUPONS_PATH = os.path.join(BASE_DIR, "coupons.json")
 WAITLIST_PATH = os.path.join(BASE_DIR, "waitlist.json")
+ADMINS_PATH = os.path.join(BASE_DIR, "admins.json")
 
 _db_lock = threading.RLock()
 _store_lock = threading.RLock()
 _roles_lock = threading.RLock()
 _coupons_lock = threading.RLock()
+_admins_lock = threading.RLock()
 
 user_states = {}
 admin_action_states = {}
@@ -172,7 +174,9 @@ def initialize_database():
             "total_amount": "TEXT",
             "admin_notes": "TEXT",
             "admin_chat_id": "INTEGER",
-            "admin_message_id": "INTEGER"
+            "admin_message_id": "INTEGER",
+            "wallet_used": "REAL DEFAULT 0.0",
+            "cashback_earned": "REAL DEFAULT 0.0"
         }
         for col, col_type in additions.items():
             if col not in columns:
@@ -224,6 +228,28 @@ def initialize_database():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_coupon_usages_code ON coupon_usages(coupon_code)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_coupon_usages_ref ON coupon_usages(order_ref)")
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_wallets (
+                user_id INTEGER PRIMARY KEY,
+                balance REAL NOT NULL DEFAULT 0.0,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS wallet_transactions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                order_ref TEXT,
+                trans_type TEXT NOT NULL,
+                amount REAL NOT NULL,
+                balance_after REAL NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_wallet_trans_user ON wallet_transactions(user_id)")
+
         # Restore in-memory user states
         states = {
             row["user_id"]: json.loads(row["state_json"])
@@ -250,6 +276,11 @@ def save_json_file(file_path, data):
     tmp_path = f"{file_path}.tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
         f.write("\n")
     os.replace(tmp_path, file_path)
 
@@ -272,6 +303,181 @@ def update_user_roles(roles):
         reseller_ids = [int(uid) for uid, info in roles.items() if info.get("role") == "reseller" and uid.isdigit()]
         save_json_file(RESELLERS_PATH, sorted(reseller_ids))
 
+# ================= Admins Management (Multi-Admin System) =================
+def get_admins():
+    with _admins_lock:
+        admins = load_json_file(ADMINS_PATH, dict)
+        owner_id_str = str(ADMIN_ID)
+        # Ensure owner is always present and marked as owner
+        if owner_id_str not in admins:
+            admins[owner_id_str] = {
+                "role": "admin",
+                "name": "المدير العام (المالك)",
+                "username": "admin",
+                "is_owner": True,
+                "added_at": utc_now()
+            }
+            save_json_file(ADMINS_PATH, admins)
+        else:
+            admins[owner_id_str]["is_owner"] = True
+            admins[owner_id_str]["role"] = "admin"
+        return admins
+
+def update_admins(admins):
+    with _admins_lock:
+        owner_id_str = str(ADMIN_ID)
+        if owner_id_str not in admins:
+            admins[owner_id_str] = {
+                "role": "admin",
+                "name": "المدير العام (المالك)",
+                "username": "admin",
+                "is_owner": True,
+                "added_at": utc_now()
+            }
+        admins[owner_id_str]["is_owner"] = True
+        save_json_file(ADMINS_PATH, admins)
+
+        # Synchronize with user_roles.json
+        roles = get_user_roles()
+        for uid, ainfo in admins.items():
+            roles[uid] = {
+                "role": "admin",
+                "name": ainfo.get("name", "مشرف"),
+                "username": ainfo.get("username", ""),
+                "updated_at": utc_now()
+            }
+        for uid in list(roles.keys()):
+            if roles[uid].get("role") == "admin" and uid not in admins and uid != owner_id_str:
+                del roles[uid]
+        update_user_roles(roles)
+
+def is_admin(user_id):
+    if not user_id:
+        return False
+    try:
+        if int(user_id) == ADMIN_ID:
+            return True
+    except (ValueError, TypeError):
+        pass
+    uid_str = str(user_id)
+    admins = get_admins()
+    if uid_str in admins:
+        return True
+    roles = get_user_roles()
+    uinfo = roles.get(uid_str)
+    if uinfo and isinstance(uinfo, dict) and uinfo.get("role") == "admin":
+        return True
+    return False
+
+def get_all_admin_ids():
+    admins = {ADMIN_ID}
+    for uid_str in get_admins():
+        if uid_str.isdigit():
+            admins.add(int(uid_str))
+    for uid_str, info in get_user_roles().items():
+        if info.get("role") == "admin" and uid_str.isdigit():
+            admins.add(int(uid_str))
+    return sorted(list(admins))
+
+def add_new_admin(user_id, name="مشرف", username=""):
+    uid_str = str(user_id)
+    admins = get_admins()
+    if uid_str in admins:
+        return False, "هذا المستخدم مسجل بالفعل كأدمن."
+    admins[uid_str] = {
+        "role": "admin",
+        "name": name or "مشرف",
+        "username": username or "",
+        "is_owner": False,
+        "added_at": utc_now()
+    }
+    update_admins(admins)
+    return True, "تمت إضافة المشرف بنجاح."
+
+def remove_existing_admin(user_id):
+    uid_str = str(user_id)
+    if uid_str == str(ADMIN_ID):
+        return False, "لا يمكن حذف المالك الأساسي للنظام."
+    admins = get_admins()
+    if uid_str not in admins:
+        return False, "المشرف غير موجود في قائمة الإدارة."
+    if admins[uid_str].get("is_owner"):
+        return False, "لا يمكن حذف المالك الأساسي للنظام."
+    del admins[uid_str]
+    update_admins(admins)
+    return True, "تم حذف المشرف بنجاح."
+
+# ================= Wallet & Cashback Helpers =================
+def get_user_wallet_balance(user_id):
+    """إجمالي الرصيد الفعلي المخزن في محفظة المستخدم"""
+    with database_connection() as conn:
+        row = conn.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,)).fetchone()
+        if row:
+            return Decimal(str(row["balance"]))
+        return Decimal("0.0")
+
+def get_user_pending_wallet_usage(user_id, exclude_request_id=None):
+    """الرصيد المحجوز حالياً في طلبات معلقة قيد المعالجة (لم يوافق عليها أو يرفضها الأدمن بعد)"""
+    with database_connection() as conn:
+        query = """
+            SELECT COALESCE(SUM(wallet_used), 0) as reserved
+            FROM payment_requests
+            WHERE user_id = ?
+              AND status IN ('awaiting_quantity', 'awaiting_custom_qty', 'awaiting_coupon', 'awaiting_coupon_code', 'awaiting_wallet', 'awaiting_receipt', 'awaiting_phone', 'awaiting_email', 'awaiting_admin')
+        """
+        params = [user_id]
+        if exclude_request_id:
+            query += " AND id != ?"
+            params.append(exclude_request_id)
+        row = conn.execute(query, tuple(params)).fetchone()
+        return Decimal(str(row["reserved"])) if row else Decimal("0.0")
+
+def get_user_available_wallet_balance(user_id, current_request_id=None):
+    """الرصيد المتاح للاستخدام الفوري (الرصيد الكلي مطروحاً منه أي حجوزات معلقة)"""
+    total = get_user_wallet_balance(user_id)
+    pending = get_user_pending_wallet_usage(user_id, exclude_request_id=current_request_id)
+    avail = total - pending
+    return max(Decimal("0.0"), avail)
+
+def add_wallet_transaction(user_id, trans_type, amount, description, order_ref=None):
+    """تعديل رصيد المحفظة وتسجيل المعاملة في جدول الحركات"""
+    with database_connection() as conn:
+        row = conn.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,)).fetchone()
+        current_bal = Decimal(str(row["balance"])) if row else Decimal("0.0")
+        new_bal = max(Decimal("0.0"), current_bal + Decimal(str(amount)))
+
+        conn.execute("""
+            INSERT INTO user_wallets (user_id, balance, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                balance = excluded.balance,
+                updated_at = excluded.updated_at
+        """, (user_id, float(new_bal), utc_now()))
+
+        conn.execute("""
+            INSERT INTO wallet_transactions (user_id, order_ref, trans_type, amount, balance_after, description, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, order_ref, trans_type, float(amount), float(new_bal), description, utc_now()))
+
+        return new_bal
+
+def get_user_wallet_transactions(user_id, limit=10):
+    with database_connection() as conn:
+        rows = conn.execute("""
+            SELECT * FROM wallet_transactions
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (user_id, limit)).fetchall()
+        return rows
+
+def get_package_cashback(package):
+    if not package:
+        return Decimal("0.0")
+    val = package.get("cashback") or package.get("cashback_amount") or "0"
+    amt = parse_price_amount(str(val))
+    return amt or Decimal("0.0")
+
 def get_coupons():
     with _coupons_lock:
         return load_json_file(COUPONS_PATH, dict)
@@ -293,7 +499,7 @@ def update_waitlist(waitlist):
 # ================= User Roles and Pricing =================
 # Roles: 'customer' (عميل), 'reseller' (تاجر), 'friend' (صديق), 'admin' (أدمن)
 def get_user_role(user_id):
-    if user_id == ADMIN_ID:
+    if is_admin(user_id):
         return "admin"
     roles = get_user_roles()
     user_info = roles.get(str(user_id))
@@ -400,10 +606,11 @@ def get_main_menu_keyboard(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     browse_btn = types.KeyboardButton("🛍 تصفح المنتجات")
     orders_btn = types.KeyboardButton("📦 سجل مشترياتي")
+    wallet_btn = types.KeyboardButton("💰 محفظتي")
     support_btn = types.KeyboardButton("💬 الدعم الفني")
     markup.add(browse_btn, orders_btn)
-    markup.add(support_btn)
-    if user_id == ADMIN_ID:
+    markup.add(wallet_btn, support_btn)
+    if is_admin(user_id):
         markup.add(types.KeyboardButton("🛠 لوحة الإدارة"))
     return markup
 
@@ -557,25 +764,26 @@ def start_new_order(user_id, prod_key, pkg_id):
     role = get_user_role(user_id)
     price_info = get_package_price_for_user(pkg, user_id)
     order_ref = generate_order_ref()
+    cb_unit = float(get_package_cashback(pkg))
 
     with database_connection() as conn:
         # Cancel any previous active order in creation step
         conn.execute("""
             UPDATE payment_requests
             SET status = 'cancelled', updated_at = ?
-            WHERE user_id = ? AND status IN ('awaiting_quantity', 'awaiting_custom_qty', 'awaiting_coupon', 'awaiting_coupon_code', 'awaiting_receipt', 'awaiting_phone', 'awaiting_email')
+            WHERE user_id = ? AND status IN ('awaiting_quantity', 'awaiting_custom_qty', 'awaiting_coupon', 'awaiting_coupon_code', 'awaiting_wallet', 'awaiting_receipt', 'awaiting_phone', 'awaiting_email')
         """, (utc_now(), user_id))
 
         cursor = conn.execute("""
             INSERT INTO payment_requests (
                 order_ref, user_id, product_key, package_key, package_name,
                 status, step, user_role, pricing_tier, unit_price,
-                quantity, discount_amount, total_amount, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, 'awaiting_quantity', 'awaiting_quantity', ?, ?, ?, 1, '0ج', ?, ?, ?)
+                quantity, discount_amount, total_amount, wallet_used, cashback_earned, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 'awaiting_quantity', 'awaiting_quantity', ?, ?, ?, 1, '0ج', ?, 0.0, ?, ?, ?)
         """, (
             order_ref, user_id, prod_key, pkg_id, pkg["label"],
             role, price_info["tier_name"], price_info["unit_price"],
-            format_currency(price_info["amount"]), utc_now(), utc_now()
+            format_currency(price_info["amount"]), cb_unit, utc_now(), utc_now()
         ))
         request_id = cursor.lastrowid
 
@@ -590,9 +798,11 @@ def start_new_order(user_id, prod_key, pkg_id):
         "user_role": role,
         "unit_price": price_info["unit_price"],
         "unit_amount": float(price_info["amount"]),
+        "cashback_unit": cb_unit,
         "quantity": 1,
         "discount_amount": 0,
         "coupon_code": None,
+        "wallet_used": 0.0,
         "total_amount": float(price_info["amount"])
     }
     save_db_user_state(user_id, state)
@@ -694,6 +904,63 @@ def handle_support_callback(call):
             bot.answer_callback_query(call.id, "❌ حدث خطأ. يرجى المحاولة لاحقاً.", show_alert=True)
         except Exception:
             pass
+
+# ================= Customer Wallet UI =================
+def format_wallet_display(user_id, user_first_name="عزيزنا العميل"):
+    bal = get_user_wallet_balance(user_id)
+    pending = get_user_pending_wallet_usage(user_id)
+    avail = get_user_available_wallet_balance(user_id)
+    txs = get_user_wallet_transactions(user_id, limit=8)
+
+    text = (
+        f"💰 <b>محفظة الكاش باك | GoPro Wallet</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>صاحب المحفظة:</b> {user_first_name}\n"
+        f"💵 <b>الرصيد المتاح للاستخدام:</b> <b>{format_currency(avail)}</b>\n"
+    )
+    if pending > Decimal("0"):
+        text += f"⏳ <b>رصيد محجوز لطلبات قيد المراجعة:</b> {format_currency(pending)}\n"
+        text += f"💼 <b>إجمالي رصيد المحفظة:</b> {format_currency(bal)}\n"
+
+    text += "━━━━━━━━━━━━━━━━━━━\n"
+
+    if not txs:
+        text += "📜 <b>سجل العمليات:</b>\n<i>لا توجد عمليات سابقة في المحفظة حتى الآن. يمكنك كسب الكاش باك عند شراء الباقات المؤهلة!</i>\n"
+    else:
+        text += "📜 <b>آخر المعاملات في المحفظة:</b>\n"
+        for t in txs:
+            dt = t["created_at"][:16].replace("T", " ")
+            amt = Decimal(str(t["amount"]))
+            if amt > Decimal("0"):
+                sign = f"🟢 +{format_currency(amt)}"
+            else:
+                sign = f"🔴 {format_currency(amt)}"
+            text += f"• {sign} | {t['description']} (<i>{dt}</i>)\n"
+
+    text += "\n💡 <i>ملاحظة: يتم عرض خيار خصم رصيدك تلقائياً عند إجراء أي طلب شراء جديد!</i>"
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🛍 تصفح المنتجات والشراء", callback_data="back_to_products"),
+        types.InlineKeyboardButton("🔄 تحديث الرصيد", callback_data="refresh_wallet")
+    )
+    return text, markup
+
+@bot.message_handler(func=lambda msg: msg.text in ("💰 محفظتي", "/wallet", "محفظتي"))
+def handle_my_wallet(message):
+    user_id = message.from_user.id
+    name = message.from_user.first_name or "العميل"
+    text, markup = format_wallet_display(user_id, name)
+    bot.send_message(message.chat.id, text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data == "refresh_wallet")
+@safe_callback
+def handle_refresh_wallet(call):
+    user_id = call.from_user.id
+    name = call.from_user.first_name or "العميل"
+    text, markup = format_wallet_display(user_id, name)
+    safe_edit_message_text(call, text, reply_markup=markup)
+    bot.answer_callback_query(call.id, "تم تحديث الرصيد!")
 
 @bot.message_handler(func=lambda msg: msg.text == "📦 سجل مشترياتي")
 def handle_my_orders(message):
@@ -874,11 +1141,15 @@ def handle_package_view(call):
 
         email_notice = "\n📧 <i>تنويه: هذه الباقة تتطلب إدخال بريدك الإلكتروني للتفعيل المباشر.</i>" if pkg.get("requires_email") else ""
 
+        cashback_amt = get_package_cashback(pkg)
+        cashback_notice = f"\n🎁 <b>كاش باك فوري:</b> {format_currency(cashback_amt)} يُضاف لمحفظتك بعد تأكيد الطلب!\n" if cashback_amt > Decimal("0") else ""
+
         caption = (
             f"🛍 <b>{prod['name']}</b>\n"
             f"📦 الباقة: <b>{label}</b>\n\n"
             f"💰 <b>{price_info['display']}</b>\n"
-            f"{extra_info}\n"
+            f"{extra_info}"
+            f"{cashback_notice}"
             f"📝 <b>الوصف والضمان:</b>\n{pkg.get('desc', '')}\n"
             f"{email_notice}"
         )
@@ -1014,8 +1285,95 @@ def handle_skip_coupon_click(call):
         bot.answer_callback_query(call.id, "انتهت الجلسة.")
         return
 
-    show_payment_instructions(user_id, state, call.message.chat.id)
+    proceed_to_payment_or_wallet(user_id, state, call.message.chat.id, call.message.message_id)
     bot.answer_callback_query(call.id)
+
+def proceed_to_payment_or_wallet(user_id, state, chat_id, message_id=None):
+    avail_wallet = get_user_available_wallet_balance(user_id, current_request_id=state.get("request_id"))
+    current_total = Decimal(str(state.get("total_amount", 0)))
+
+    if avail_wallet > Decimal("0") and current_total > Decimal("0"):
+        usable = min(avail_wallet, current_total)
+        state["step"] = "awaiting_wallet"
+        save_db_user_state(user_id, state)
+
+        text = (
+            f"💰 <b>رصيد المحفظة متاح:</b> لديك <b>{format_currency(avail_wallet)}</b> في محفظتك كاش باك!\n\n"
+            f"💵 إجمالي الفاتورة الحالي: <b>{format_currency(current_total)}</b>\n\n"
+            f"هل ترغب في استخدام رصيدك لخصم <b>{format_currency(usable)}</b> من قيمة هذا الطلب؟"
+        )
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton(f"✅ نعم، استخدام {format_currency(usable)} من الرصيد", callback_data=f"wallet_yes_{state['request_id']}"),
+            types.InlineKeyboardButton("⏩ لا، المتابعة بالدفع المباشر", callback_data=f"wallet_skip_{state['request_id']}"),
+            types.InlineKeyboardButton("❌ إلغاء الطلب", callback_data=f"cancel_order_{state['request_id']}")
+        )
+        if message_id:
+            try:
+                bot.edit_message_text(text, chat_id=chat_id, message_id=message_id, reply_markup=markup)
+                return
+            except Exception:
+                pass
+        bot.send_message(chat_id, text, reply_markup=markup)
+    else:
+        show_payment_instructions(user_id, state, chat_id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("wallet_yes_"))
+@safe_callback
+def handle_wallet_yes(call):
+    user_id = call.from_user.id
+    request_id = int(call.data.replace("wallet_yes_", ""))
+    state = user_states.get(user_id)
+    if not state or state.get("request_id") != request_id:
+        bot.answer_callback_query(call.id, "انتهت صلاحية الجلسة.")
+        return
+
+    avail_wallet = get_user_available_wallet_balance(user_id, current_request_id=request_id)
+    current_total = Decimal(str(state.get("total_amount", 0)))
+    usable = min(avail_wallet, current_total)
+    new_total = max(Decimal("0"), current_total - usable)
+
+    state["wallet_used"] = float(usable)
+    state["total_amount"] = float(new_total)
+    save_db_user_state(user_id, state)
+
+    with database_connection() as conn:
+        conn.execute("""
+            UPDATE payment_requests
+            SET wallet_used = ?, total_amount = ?, updated_at = ?
+            WHERE id = ?
+        """, (float(usable), format_currency(new_total), utc_now(), request_id))
+
+    bot.answer_callback_query(call.id, f"تم خصم {format_currency(usable)} من الطلب!")
+    try:
+        bot.edit_message_text(
+            f"✅ <b>تم تطبيق خصم المحفظة بنجاح! (-{format_currency(usable)})</b>\n"
+            f"💰 المبلغ المتبقي المطلوب تحويله: <b>{format_currency(new_total)}</b>",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id
+        )
+    except Exception:
+        pass
+
+    show_payment_instructions(user_id, state, call.message.chat.id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("wallet_skip_"))
+@safe_callback
+def handle_wallet_skip(call):
+    user_id = call.from_user.id
+    request_id = int(call.data.replace("wallet_skip_", ""))
+    state = user_states.get(user_id)
+    if not state or state.get("request_id") != request_id:
+        bot.answer_callback_query(call.id, "انتهت صلاحية الجلسة.")
+        return
+
+    state["wallet_used"] = 0.0
+    save_db_user_state(user_id, state)
+    with database_connection() as conn:
+        conn.execute("UPDATE payment_requests SET wallet_used = 0.0, updated_at = ? WHERE id = ?", (utc_now(), request_id))
+
+    bot.answer_callback_query(call.id, "المتابعة بالدفع المباشر.")
+    show_payment_instructions(user_id, state, call.message.chat.id)
 
 def apply_coupon_to_order(user_id, state, code, chat_id):
     coupons = get_coupons()
@@ -1072,20 +1430,42 @@ def apply_coupon_to_order(user_id, state, code, chat_id):
         f"✂️ قيمة الخصم: <b>-{format_currency(discount)}</b>\n"
         f"💵 الإجمالي بعد الخصم: <b>{format_currency(final_total)}</b>"
     )
-    show_payment_instructions(user_id, state, chat_id)
+    proceed_to_payment_or_wallet(user_id, state, chat_id)
 
 def show_payment_instructions(user_id, state, chat_id):
+    total_amt = Decimal(str(state.get("total_amount", 0)))
+    total_str = format_currency(total_amt)
+    discount_line = f"✂️ الخصم المطبق (كود): {format_currency(Decimal(str(state['discount_amount'])))} (كود: {state['coupon_code']})\n" if state.get("coupon_code") else ""
+    wallet_line = f"🪙 الخصم من المحفظة: -{format_currency(Decimal(str(state['wallet_used'])))}\n" if state.get("wallet_used") else ""
+
+    if total_amt <= Decimal("0"):
+        state["step"] = "awaiting_phone"
+        save_db_user_state(user_id, state)
+        with database_connection() as conn:
+            conn.execute("UPDATE payment_requests SET step = 'awaiting_phone', updated_at = ? WHERE id = ?", (utc_now(), state["request_id"]))
+        instructions = (
+            f"🎉 <b>تم تغطية كامل قيمة الطلب من رصيد محفظتك!</b>\n\n"
+            f"🔢 <b>رقم الطلب:</b> <code>#{state['order_ref']}</code>\n"
+            f"🛍 <b>المنتج:</b> <b>{state['package_name']}</b>\n"
+            f"🔢 <b>الكمية:</b> <b>{state['quantity']}</b>\n"
+            f"{discount_line}"
+            f"{wallet_line}"
+            f"💰 <b>المبلغ المطلوب تحويله:</b> <b>0ج</b>\n\n"
+            "📱 <b>الخطوة التالية:</b>\n"
+            "يرجى إرسال <b>رقم هاتفك</b> للتواصل ومتابعة تسليم وتفعيل الطلب:"
+        )
+        bot.send_message(chat_id, instructions)
+        return
+
     state["step"] = "awaiting_receipt"
     save_db_user_state(user_id, state)
-
-    total_str = format_currency(Decimal(str(state["total_amount"])))
-    discount_line = f"✂️ الخصم المطبق: {format_currency(Decimal(str(state['discount_amount'])))} (كود: {state['coupon_code']})\n" if state.get("coupon_code") else ""
 
     instructions = (
         f"💳 <b>بيانات الدفع والتحويل | طلب رقم #{state['order_ref']}</b>\n\n"
         f"🛍 المنتج: <b>{state['package_name']}</b>\n"
         f"🔢 الكمية: <b>{state['quantity']}</b>\n"
         f"{discount_line}"
+        f"{wallet_line}"
         f"💰 <b>المبلغ المطلوب تحويله: {total_str}</b>\n\n"
         f"📲 <b>رقم فودافون كاش للتحويل:</b>\n"
         f"<code>{VODAFONE_CASH}</code>\n"
@@ -1102,7 +1482,7 @@ def handle_receipt_photo(message):
 
     # Admin broadcast photo
     admin_state = admin_action_states.get(user_id)
-    if admin_state and admin_state.get("action") in ("broadcast_text", "broadcast_photo") and user_id == ADMIN_ID:
+    if admin_state and admin_state.get("action") in ("broadcast_text", "broadcast_photo") and is_admin(user_id):
         admin_action_states.pop(user_id, None)
         photo_id = message.photo[-1].file_id
         caption = message.caption or ""
@@ -1138,7 +1518,7 @@ def handle_receipt_photo(message):
         return
 
     # Admin new product photo upload
-    if admin_state and admin_state.get("action") == "add_product_photo" and user_id == ADMIN_ID:
+    if admin_state and admin_state.get("action") == "add_product_photo" and is_admin(user_id):
         product_name = admin_state.get("product_name", "منتج جديد")
         product_key = admin_state.get("product_key", "new_product")
         description = admin_state.get("description", "")
@@ -1166,7 +1546,7 @@ def handle_receipt_photo(message):
         return
 
     # Admin product photo upload (update existing)
-    if admin_state and admin_state.get("action") == "update_product_photo" and user_id == ADMIN_ID:
+    if admin_state and admin_state.get("action") == "update_product_photo" and is_admin(user_id):
         prod_key = admin_state["prod_key"]
         admin_action_states.pop(user_id, None)
 
@@ -1217,6 +1597,10 @@ def handle_receipt_photo(message):
 def handle_text_messages(message):
     user_id = message.from_user.id
     text = (message.text or "").strip()
+
+    if text.startswith("/wallet"):
+        handle_my_wallet(message)
+        return
 
     # Admin command intercept
     if text.startswith("/admin"):
@@ -1332,6 +1716,10 @@ def finalize_order_submission(message, state, customer_email=None):
             })
             update_coupons(coupons)
 
+    wallet_used = state.get("wallet_used", 0.0)
+    cashback_unit = float(state.get("cashback_unit", 0))
+    cashback_earned = cashback_unit * state.get("quantity", 1)
+
     # Save to SQLite
     with database_connection() as conn:
         conn.execute("""
@@ -1340,13 +1728,13 @@ def finalize_order_submission(message, state, customer_email=None):
                 phone_number = ?, customer_email = ?,
                 customer_username = ?, customer_first_name = ?, customer_last_name = ?,
                 quantity = ?, discount_amount = ?, coupon_code = ?,
-                total_amount = ?, updated_at = ?
+                total_amount = ?, wallet_used = ?, cashback_earned = ?, updated_at = ?
             WHERE id = ?
         """, (
             phone, customer_email,
             customer.username or "", customer.first_name or "", customer.last_name or "",
             state["quantity"], format_currency(discount_amount), coupon_code,
-            format_currency(total_amount), utc_now(), request_id
+            format_currency(total_amount), float(wallet_used), float(cashback_earned), utc_now(), request_id
         ))
 
     clear_db_user_state(user_id)
@@ -1384,12 +1772,14 @@ def log_notification(user_id, notification_type, content, status):
 
 def get_all_admin_ids():
     """جلب جميع معرفات المدراء المسجلين لإرسال التنبيهات لهم"""
-    roles = get_user_roles()
     admins = {ADMIN_ID}
-    for uid, info in roles.items():
-        if info.get("role") == "admin" and uid.isdigit():
-            admins.add(int(uid))
-    return list(admins)
+    for uid_str in get_admins():
+        if uid_str.isdigit():
+            admins.add(int(uid_str))
+    for uid_str, info in get_user_roles().items():
+        if info.get("role") == "admin" and uid_str.isdigit():
+            admins.add(int(uid_str))
+    return sorted(list(admins))
 
 def send_instant_notification(chat_id, text, reply_markup=None, photo_id=None, notification_type="general", loud=True):
     """
@@ -1450,8 +1840,10 @@ def notify_admins_new_order(request_id):
         f"🛍 <b>المنتج:</b> {row['product_key']} ({row['package_name']})\n"
         f"🔢 <b>الكمية:</b> {row['quantity']}\n"
         f"💵 <b>سعر القطعة:</b> {row['unit_price']}\n"
-        + (f"🎟 <b>الكوبون:</b> {row['coupon_code']} (خصم: {row['discount_amount']})\n" if row['coupon_code'] else "") +
-        f"💰 <b>الإجمالي المطلوب:</b> <b>{row['total_amount']}</b>\n"
+        + (f"🎟 <b>الكوبون:</b> {row['coupon_code']} (خصم: {row['discount_amount']})\n" if row['coupon_code'] else "")
+        + (f"🪙 <b>خصم المحفظة (معلق):</b> {format_currency(Decimal(str(row['wallet_used']))}\n" if row['wallet_used'] and float(row['wallet_used']) > 0 else "")
+        + (f"🎁 <b>كاش باك مؤهل عند القبول:</b> {format_currency(Decimal(str(row['cashback_earned']))}\n" if row['cashback_earned'] and float(row['cashback_earned']) > 0 else "")
+        + f"💰 <b>الإجمالي المطلوب تحويله:</b> <b>{row['total_amount']}</b>\n"
         f"📱 <b>رقم المحول منه:</b> <code>{row['phone_number']}</code>\n"
         + (f"📧 <b>إيميل التفعيل:</b> <code>{row['customer_email']}</code>\n" if row['customer_email'] else "") +
         f"⏰ <b>التوقيت:</b> {row['created_at'][:16].replace('T', ' ')}\n"
@@ -1486,6 +1878,16 @@ def notify_customer_status_change(order_row, new_status, reason=None):
     total = order_row["total_amount"]
 
     if new_status == "accepted":
+        wallet_notes = ""
+        wallet_used = Decimal(str(order_row["wallet_used"] or 0))
+        cashback_earned = Decimal(str(order_row["cashback_earned"] or 0))
+        if wallet_used > Decimal("0"):
+            wallet_notes += f"\n🪙 <b>خصم المحفظة المطبق:</b> -{format_currency(wallet_used)}"
+        if cashback_earned > Decimal("0"):
+            wallet_notes += f"\n🎁 <b>كاش باك مكتسب:</b> +{format_currency(cashback_earned)} (تم إيداعه في محفظتك!)"
+        current_wallet_bal = get_user_wallet_balance(user_id)
+        wallet_notes += f"\n💰 <b>رصيد محفظتك الحالي:</b> <b>{format_currency(current_wallet_bal)}</b>"
+
         customer_msg = (
             "🎉 <b>تنبيه فوري: تم قبول وتأكيد طلبك بنجاح!</b> ✅\n"
             "━━━━━━━━━━━━━━━━━━━\n"
@@ -1494,6 +1896,7 @@ def notify_customer_status_change(order_row, new_status, reason=None):
             f"💰 <b>المبلغ المدفوع:</b> {total}\n"
             + (f"📧 <b>الإيميل المعتمد:</b> <code>{order_row['customer_email']}</code>\n" if order_row['customer_email'] else "") +
             "📌 <b>الحالة:</b> <b>✅ تم القبول والتفعيل</b>\n"
+            + wallet_notes + "\n"
             "━━━━━━━━━━━━━━━━━━━\n"
             "🚀 سيتم تسليمك تفاصيل الحساب أو إرسال الدعوة لبريدك حالاً.\n"
             "❤️ شكراً لثقتك بمتجرنا!"
@@ -1511,12 +1914,18 @@ def notify_customer_status_change(order_row, new_status, reason=None):
         )
 
     elif new_status == "rejected":
+        wallet_rel_note = ""
+        wallet_used = Decimal(str(order_row["wallet_used"] or 0))
+        if wallet_used > Decimal("0"):
+            wallet_rel_note = f"\n🪙 <b>تنويه:</b> تم إلغاء حجز رصيد المحفظة ({format_currency(wallet_used)}) وهو متاح في محفظتك بالكامل للاستخدام.\n"
+
         customer_msg = (
             "⚠️ <b>تنبيه فوري: تحديث بشأن طلبك رقم #{order_ref}</b> ❌\n"
             "━━━━━━━━━━━━━━━━━━━\n"
             f"🛍 <b>المنتج:</b> {pkg_name}\n"
             "📌 <b>الحالة:</b> <b>نعتذر، لم يتم تأكيد هذا الطلب</b>\n\n"
             f"📝 <b>السبب:</b> {reason or 'تعذر التحقق من وصول مبلغ التحويل أو مطابقة بيانات الإيصال المرسل.'}\n"
+            + wallet_rel_note +
             "━━━━━━━━━━━━━━━━━━━\n"
             "💬 إذا قمت بالتحويل بالفعل، يرجى التواصل مع فريق الدعم الفني للمراجعة الفورية:"
         )
@@ -1606,19 +2015,43 @@ def record_coupon_usage_on_acceptance(order_row):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_acc_"))
 @safe_callback
 def handle_admin_accept(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "غير مصرح لك.", show_alert=True)
         return
     request_id = int(call.data.replace("adm_acc_", ""))
     with database_connection() as conn:
         row = conn.execute("SELECT * FROM payment_requests WHERE id = ?", (request_id,)).fetchone()
         if not row or row["status"] != "awaiting_admin":
-            bot.answer_callback_query(call.id, "تم التعامل مع هذا الطلب مسبقاً.", show_alert=True)
+            bot.answer_callback_query(call.id, "تم التعامل مع هذا الطلب مسبقاً من قبل مسؤول آخر.", show_alert=True)
             return
         conn.execute("UPDATE payment_requests SET status = 'accepted', updated_at = ? WHERE id = ?", (utc_now(), request_id))
 
     # تسجيل استخدام الكوبون تلقائياً في قاعدة البيانات فور قبول الطلب
     record_coupon_usage_on_acceptance(row)
+
+    # معالجة المحفظة والكاش باك
+    user_id = row["user_id"]
+    order_ref = row["order_ref"]
+    wallet_used = Decimal(str(row["wallet_used"] or 0))
+    cashback_earned = Decimal(str(row["cashback_earned"] or 0))
+
+    if wallet_used > Decimal("0"):
+        add_wallet_transaction(
+            user_id,
+            "wallet_discount",
+            -wallet_used,
+            f"خصم من رصيد المحفظة للطلب #{order_ref}",
+            order_ref=order_ref
+        )
+
+    if cashback_earned > Decimal("0"):
+        add_wallet_transaction(
+            user_id,
+            "cashback_earned",
+            cashback_earned,
+            f"كاش باك مكتسب من طلب #{order_ref}",
+            order_ref=order_ref
+        )
 
     # إرسال تنبيه فوري مصحوب بصوت للعميل
     notify_customer_status_change(row, "accepted")
@@ -1626,15 +2059,16 @@ def handle_admin_accept(call):
     # إظهار تنبيه Popup فوري للأدمن
     bot.answer_callback_query(
         call.id, 
-        text=f"🔔 تم قبول الطلب #{row['order_ref']} بنجاح وتم إرسال تنبيه فوري للعميل!", 
+        text=f"🔔 تم قبول الطلب #{row['order_ref']} بنجاح وتم تحديث المحفظة وإشعار العميل!", 
         show_alert=True
     )
 
     try:
+        admin_name = call.from_user.first_name or "المشرف"
         bot.edit_message_caption(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            caption=call.message.caption + "\n\n✅ <b>تم قبول الطلب واعتماده وإشعار العميل بنجاح.</b>"
+            caption=call.message.caption + f"\n\n✅ <b>تم قبول الطلب واعتماده بواسطة: {admin_name}</b>"
         )
     except Exception:
         pass
@@ -1642,32 +2076,33 @@ def handle_admin_accept(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_rej_"))
 @safe_callback
 def handle_admin_reject(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         bot.answer_callback_query(call.id, "غير مصرح لك.", show_alert=True)
         return
     request_id = int(call.data.replace("adm_rej_", ""))
     with database_connection() as conn:
         row = conn.execute("SELECT * FROM payment_requests WHERE id = ?", (request_id,)).fetchone()
         if not row or row["status"] != "awaiting_admin":
-            bot.answer_callback_query(call.id, "تم التعامل مع هذا الطلب مسبقاً.", show_alert=True)
+            bot.answer_callback_query(call.id, "تم التعامل مع هذا الطلب مسبقاً من قبل مسؤول آخر.", show_alert=True)
             return
         conn.execute("UPDATE payment_requests SET status = 'rejected', updated_at = ? WHERE id = ?", (utc_now(), request_id))
 
-    # إرسال تنبيه فوري للعميل بسبب الرفض
+    # إرسال تنبيه فوري للعميل بسبب الرفض (إلغاء حجز المحفظة تلقائي)
     notify_customer_status_change(row, "rejected")
 
     # إظهار تنبيه Popup فوري للأدمن
     bot.answer_callback_query(
         call.id, 
-        text=f"⚠️ تم رفض الطلب #{row['order_ref']} وإرسال إشعار تنبيه للعميل بالسبب.", 
+        text=f"⚠️ تم رفض الطلب #{row['order_ref']} وإشعار العميل وإلغاء أي حجز للرصيد.", 
         show_alert=True
     )
 
     try:
+        admin_name = call.from_user.first_name or "المشرف"
         bot.edit_message_caption(
             chat_id=call.message.chat.id,
             message_id=call.message.message_id,
-            caption=call.message.caption + "\n\n❌ <b>تم رفض الطلب وإشعار العميل فوراً.</b>"
+            caption=call.message.caption + f"\n\n❌ <b>تم رفض الطلب بواسطة: {admin_name} وإشعار العميل فوراً.</b>"
         )
     except Exception:
         pass
@@ -1686,6 +2121,9 @@ def build_admin_main_keyboard():
     markup.add(
         types.InlineKeyboardButton("👥 إدارة الرتب (تجار / أصدقاء)", callback_data="adm_view_roles"),
         types.InlineKeyboardButton("🏷 تعديل الأسعار الثلاثية", callback_data="adm_edit_prices")
+    )
+    markup.add(
+        types.InlineKeyboardButton("👑 إدارة المشرفين (Admins)", callback_data="adm_manage_admins")
     )
     markup.add(
         types.InlineKeyboardButton("🔍 مراجعة بيانات عميل", callback_data="adm_lookup_customer"),
@@ -1717,12 +2155,12 @@ def build_admin_main_keyboard():
 
 @bot.message_handler(func=lambda msg: msg.text == "🛠 لوحة الإدارة")
 def handle_admin_panel_button(message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         return
     handle_admin_panel(message)
 
 def handle_admin_panel(message):
-    if message.from_user.id != ADMIN_ID:
+    if not is_admin(message.from_user.id):
         return
     bot.send_message(
         message.chat.id,
@@ -1733,7 +2171,7 @@ def handle_admin_panel(message):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_back_to_main")
 @safe_callback
 def handle_adm_back_to_main(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     safe_edit_message_text(
@@ -1746,7 +2184,7 @@ def handle_adm_back_to_main(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_pending")
 @safe_callback
 def handle_adm_view_pending(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     with database_connection() as conn:
@@ -1768,7 +2206,7 @@ def handle_adm_view_pending(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_stats")
 @safe_callback
 def handle_adm_view_stats(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     with database_connection() as conn:
@@ -1807,7 +2245,7 @@ def handle_adm_view_stats(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_roles")
 @safe_callback
 def handle_adm_view_roles(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     roles = get_user_roles()
@@ -1837,7 +2275,7 @@ def handle_adm_view_roles(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_role_set_"))
 @safe_callback
 def handle_adm_role_prompt(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     target_role = call.data.replace("adm_role_set_", "")
     role_names = {"reseller": "تاجر", "friend": "صديق", "customer": "عميل"}
@@ -1853,7 +2291,7 @@ def handle_adm_role_prompt(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_edit_prices")
 @safe_callback
 def handle_adm_edit_prices_select_prod(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     store = get_store_data()
@@ -1866,7 +2304,7 @@ def handle_adm_edit_prices_select_prod(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_price_prod_"))
 @safe_callback
 def handle_adm_edit_prices_select_pkg(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     prod_key = call.data.replace("adm_price_prod_", "")
@@ -1878,48 +2316,91 @@ def handle_adm_edit_prices_select_pkg(call):
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     for pkg in prod.get("packages", []):
-        text = f"{pkg['label']} | ع:{pkg.get('retail_price')} ت:{pkg.get('reseller_price')} ص:{pkg.get('friend_price')}"
-        markup.add(types.InlineKeyboardButton(text, callback_data=f"adm_pkg_tier_{prod_key}_{pkg['id']}"))
+        cb_txt = f" ك:{pkg.get('cashback', '0ج')}" if pkg.get('cashback') else ""
+        text = f"{pkg['label']} | ع:{pkg.get('retail_price')} ت:{pkg.get('reseller_price')} ص:{pkg.get('friend_price')}{cb_txt}"
+        markup.add(types.InlineKeyboardButton(text, callback_data=f"adm_pkg_tier:{prod_key}:{pkg['id']}"))
     markup.add(types.InlineKeyboardButton("🔙 رجوع للمنتجات", callback_data="adm_edit_prices"))
     safe_edit_message_text(call, f"اختر الباقة المراد تعديل أسعارها في <b>{prod['name']}</b>:", reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_pkg_tier_"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_pkg_tier:") or c.data.startswith("adm_pkg_tier_"))
 @safe_callback
 def handle_adm_choose_price_tier(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
-    _, _, _, prod_key, pkg_id = call.data.split("_", 4)
+    if ":" in call.data:
+        _, prod_key, pkg_id = call.data.split(":", 2)
+    else:
+        raw = call.data.replace("adm_pkg_tier_", "")
+        store = get_store_data()
+        found_prod, found_pkg = None, None
+        for pk in store:
+            if raw.startswith(pk + "_"):
+                found_prod = pk
+                found_pkg = raw[len(pk) + 1:]
+                break
+        prod_key = found_prod or "chatgpt"
+        pkg_id = found_pkg or raw
+
     store = get_store_data()
     prod = store.get(prod_key)
-    pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
+    pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None) if prod else None
     if not pkg:
         bot.answer_callback_query(call.id, "الباقة غير موجودة.", show_alert=True)
         return
 
     text = (
         f"📦 <b>{prod['name']} — {pkg['label']}</b>\n\n"
-        f"1️⃣ سعر العميل: <b>{pkg.get('retail_price')}</b>\n"
-        f"2️⃣ سعر التاجر: <b>{pkg.get('reseller_price')}</b>\n"
-        f"3️⃣ سعر الصديق: <b>{pkg.get('friend_price')}</b>\n\n"
-        "اختر أي فئة سعرية تريد تعديلها بشكل منفصل:"
+        f"1️⃣ سعر العميل: <b>{pkg.get('retail_price', '0ج')}</b>\n"
+        f"2️⃣ سعر التاجر: <b>{pkg.get('reseller_price', '0ج')}</b>\n"
+        f"3️⃣ سعر الصديق: <b>{pkg.get('friend_price', '0ج')}</b>\n"
+        f"🎁 كاش باك الباقة: <b>{pkg.get('cashback', '0ج')}</b>\n\n"
+        "اختر أي فئة تريد تعديلها بشكل منفصل:"
     )
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
-        types.InlineKeyboardButton("✏️ تعديل سعر العميل (Customer)", callback_data=f"adm_setprice_{prod_key}_{pkg_id}_retail_price"),
-        types.InlineKeyboardButton("💼 تعديل سعر التاجر (Reseller)", callback_data=f"adm_setprice_{prod_key}_{pkg_id}_reseller_price"),
-        types.InlineKeyboardButton("🤝 تعديل سعر الصديق (Friend)", callback_data=f"adm_setprice_{prod_key}_{pkg_id}_friend_price"),
+        types.InlineKeyboardButton("✏️ تعديل سعر العميل (Customer)", callback_data=f"adm_setprice:{prod_key}:{pkg_id}:retail_price"),
+        types.InlineKeyboardButton("💼 تعديل سعر التاجر (Reseller)", callback_data=f"adm_setprice:{prod_key}:{pkg_id}:reseller_price"),
+        types.InlineKeyboardButton("🤝 تعديل سعر الصديق (Friend)", callback_data=f"adm_setprice:{prod_key}:{pkg_id}:friend_price"),
+        types.InlineKeyboardButton("🎁 تعديل كاش باك الباقة (Cashback)", callback_data=f"adm_setprice:{prod_key}:{pkg_id}:cashback"),
         types.InlineKeyboardButton("🔙 رجوع للباقات", callback_data=f"adm_price_prod_{prod_key}")
     )
     safe_edit_message_text(call, text, reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_setprice_"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_setprice:") or c.data.startswith("adm_setprice_"))
 @safe_callback
 def handle_adm_setprice_prompt(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
-    _, _, prod_key, pkg_id, tier_field = call.data.split("_", 4)
-    tier_names = {"retail_price": "سعر العميل", "reseller_price": "سعر التاجر", "friend_price": "سعر الصديق"}
+    bot.answer_callback_query(call.id)
+    if ":" in call.data:
+        _, prod_key, pkg_id, tier_field = call.data.split(":", 3)
+    else:
+        raw = call.data.replace("adm_setprice_", "")
+        known_fields = ["retail_price", "reseller_price", "friend_price", "cashback"]
+        matched_field = None
+        for kf in known_fields:
+            if raw.endswith("_" + kf):
+                matched_field = kf
+                raw = raw[:-len("_" + kf)]
+                break
+        tier_field = matched_field or "retail_price"
+        store = get_store_data()
+        found_prod, found_pkg = None, None
+        for pk in store:
+            if raw.startswith(pk + "_"):
+                found_prod = pk
+                found_pkg = raw[len(pk) + 1:]
+                break
+        prod_key = found_prod or "chatgpt"
+        pkg_id = found_pkg or raw
+
+    tier_names = {
+        "retail_price": "سعر العميل",
+        "reseller_price": "سعر التاجر",
+        "friend_price": "سعر الصديق",
+        "cashback": "قيمة الكاش باك"
+    }
 
     admin_action_states[call.from_user.id] = {
         "action": "update_price",
@@ -1929,15 +2410,14 @@ def handle_adm_setprice_prompt(call):
     }
     bot.send_message(
         call.message.chat.id,
-        f"أرسل الآن القيمة الجديدة لـ <b>{tier_names.get(tier_field)}</b> (مثال: <code>350ج</code> أو <code>350</code>)، أو /cancel للإلغاء:"
+        f"أرسل الآن القيمة الجديدة لـ <b>{tier_names.get(tier_field, tier_field)}</b> (مثال: <code>350ج</code> أو <code>350</code>)، أو /cancel للإلغاء:"
     )
-    bot.answer_callback_query(call.id)
 
 # 5. Coupon System Management
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_coupons")
 @safe_callback
 def handle_adm_view_coupons(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     coupons = get_coupons()
@@ -1973,7 +2453,7 @@ def handle_adm_view_coupons(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_coupon_create")
 @safe_callback
 def handle_adm_coupon_create_prompt(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     admin_action_states[call.from_user.id] = {"action": "create_coupon_step1"}
     bot.send_message(
@@ -1988,7 +2468,7 @@ def handle_adm_coupon_create_prompt(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_coupon_delete")
 @safe_callback
 def handle_adm_coupon_delete_prompt(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     coupons = get_coupons()
@@ -2004,7 +2484,7 @@ def handle_adm_coupon_delete_prompt(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_coup_"))
 @safe_callback
 def handle_adm_confirm_delete_coupon(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     code = call.data.replace("adm_del_coup_", "")
     coupons = get_coupons()
@@ -2019,7 +2499,7 @@ def handle_adm_confirm_delete_coupon(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_sel_all")
 @safe_callback
 def handle_adm_cpn_select_all(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     state = admin_action_states.get(call.from_user.id)
     if not state or state.get("action") != "create_coupon_step2":
@@ -2037,7 +2517,7 @@ def handle_adm_cpn_select_all(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cpn_sel_") and c.data != "adm_cpn_sel_all")
 @safe_callback
 def handle_adm_cpn_toggle_product(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     state = admin_action_states.get(call.from_user.id)
     if not state or state.get("action") != "create_coupon_step2":
@@ -2061,7 +2541,7 @@ def handle_adm_cpn_toggle_product(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_to_tiers")
 @safe_callback
 def handle_adm_cpn_to_tiers(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     state = admin_action_states.get(call.from_user.id)
     if not state or state.get("action") != "create_coupon_step2":
@@ -2081,7 +2561,7 @@ def handle_adm_cpn_to_tiers(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_back_to_products")
 @safe_callback
 def handle_adm_cpn_back_to_products(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     state = admin_action_states.get(call.from_user.id)
     if not state or state.get("action") != "create_coupon_step2":
@@ -2097,7 +2577,7 @@ def handle_adm_cpn_back_to_products(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_tier_all")
 @safe_callback
 def handle_adm_cpn_tier_select_all(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     state = admin_action_states.get(call.from_user.id)
     if not state or state.get("action") != "create_coupon_step2":
@@ -2115,7 +2595,7 @@ def handle_adm_cpn_tier_select_all(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cpn_tier_") and c.data not in ("adm_cpn_tier_all",))
 @safe_callback
 def handle_adm_cpn_toggle_tier(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     state = admin_action_states.get(call.from_user.id)
     if not state or state.get("action") != "create_coupon_step2":
@@ -2139,7 +2619,7 @@ def handle_adm_cpn_toggle_tier(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_cpn_confirm")
 @safe_callback
 def handle_adm_cpn_confirm_creation(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     state = admin_action_states.get(call.from_user.id)
     if not state or state.get("action") != "create_coupon_step2":
@@ -2311,7 +2791,7 @@ def format_coupon_detailed_report(code, c):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_coupon_stats")
 @safe_callback
 def handle_adm_coupon_stats_menu(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     coupons = get_coupons()
@@ -2364,7 +2844,7 @@ def handle_adm_coupon_stats_menu(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cpstat_") and c.data != "adm_cpstat_all")
 @safe_callback
 def handle_adm_single_coupon_detail(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     code = call.data.replace("adm_cpstat_", "")
@@ -2385,7 +2865,7 @@ def handle_adm_single_coupon_detail(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_cpstat_all")
 @safe_callback
 def handle_adm_all_coupons_report(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     coupons = get_coupons()
@@ -2409,7 +2889,7 @@ def handle_adm_all_coupons_report(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_export_coupons")
 @safe_callback
 def handle_adm_export_coupons_file(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     coupons = get_coupons()
     now_str = utc_now()[:19].replace("T", " ")
@@ -2454,7 +2934,7 @@ def handle_adm_export_coupons_file(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_lookup_customer")
 @safe_callback
 def handle_adm_lookup_customer_prompt(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     admin_action_states[call.from_user.id] = {"action": "lookup_customer"}
     bot.send_message(
@@ -2468,7 +2948,7 @@ def handle_adm_lookup_customer_prompt(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_cust_"))
 @safe_callback
 def handle_adm_customer_shortcut(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     target_id = int(call.data.replace("adm_cust_", ""))
     report = generate_customer_report(target_id)
@@ -2528,7 +3008,7 @@ def generate_customer_report(user_id=None, username=None):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_toggle_products")
 @safe_callback
 def handle_adm_toggle_products_view(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     store = get_store_data()
@@ -2542,7 +3022,7 @@ def handle_adm_toggle_products_view(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_tog_"))
 @safe_callback
 def handle_adm_toggle_product_status(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     prod_key = call.data.replace("adm_tog_", "")
     store = get_store_data()
@@ -2557,7 +3037,7 @@ def handle_adm_toggle_product_status(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_edit_descriptions")
 @safe_callback
 def handle_adm_edit_descriptions_view(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     store = get_store_data()
@@ -2578,7 +3058,7 @@ def handle_adm_edit_descriptions_view(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_edit_desc_"))
 @safe_callback
 def handle_adm_edit_desc_prompt(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     prod_key = call.data.replace("adm_edit_desc_", "")
     store = get_store_data()
@@ -2601,7 +3081,7 @@ def handle_adm_edit_desc_prompt(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_manage_photos")
 @safe_callback
 def handle_adm_manage_photos_view(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     store = get_store_data()
@@ -2624,7 +3104,7 @@ def handle_adm_manage_photos_view(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_photo_"))
 @safe_callback
 def handle_adm_photo_product_selected(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     prod_key = call.data.replace("adm_photo_", "")
     store = get_store_data()
@@ -2654,7 +3134,7 @@ def handle_adm_photo_product_selected(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_photo_"))
 @safe_callback
 def handle_adm_delete_product_photo(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     prod_key = call.data.replace("adm_del_photo_", "")
     store = get_store_data()
@@ -2685,7 +3165,7 @@ def handle_adm_delete_product_photo(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_notifications")
 @safe_callback
 def handle_adm_view_notifications(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     with database_connection() as conn:
@@ -2720,7 +3200,7 @@ def handle_adm_view_notifications(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_test_alert")
 @safe_callback
 def handle_adm_test_alert(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     test_text = (
         "🔔 <b>تنبيه اختباري فوري!</b> ⚡️\n\n"
@@ -2737,7 +3217,7 @@ def handle_adm_test_alert(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_send_user_alert")
 @safe_callback
 def handle_adm_send_user_alert_prompt(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     admin_action_states[call.from_user.id] = {"action": "send_custom_notification"}
     bot.send_message(
@@ -2870,7 +3350,7 @@ def handle_waitlist_request(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_tier_availability")
 @safe_callback
 def handle_adm_tier_availability_view(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     store = get_store_data()
@@ -2890,7 +3370,7 @@ def handle_adm_tier_availability_view(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_tier_prod_"))
 @safe_callback
 def handle_adm_tier_select_product(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     prod_key = call.data.replace("adm_tier_prod_", "")
@@ -2920,7 +3400,7 @@ def handle_adm_tier_select_product(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_tier_toggle_"))
 @safe_callback
 def handle_adm_tier_toggle(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     parts = call.data.replace("adm_tier_toggle_", "").split("_", 1)
     prod_key = parts[0]
@@ -2965,7 +3445,7 @@ def handle_adm_tier_toggle(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_broadcast")
 @safe_callback
 def handle_adm_broadcast_prompt(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     admin_action_states[call.from_user.id] = {"action": "broadcast_text"}
     bot.send_message(
@@ -2983,7 +3463,7 @@ def handle_adm_broadcast_prompt(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_add_product")
 @safe_callback
 def handle_adm_add_product_start(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     admin_action_states[call.from_user.id] = {"action": "add_product_name"}
     bot.send_message(
@@ -2997,7 +3477,7 @@ def handle_adm_add_product_start(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_delete_product")
 @safe_callback
 def handle_adm_delete_product_list(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     store = get_store_data()
@@ -3019,7 +3499,7 @@ def handle_adm_delete_product_list(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_prod_"))
 @safe_callback
 def handle_adm_delete_product_confirm(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     prod_key = call.data.replace("adm_del_prod_", "")
     store = get_store_data()
@@ -3047,7 +3527,7 @@ def handle_adm_delete_product_confirm(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_confirm_del_prod_"))
 @safe_callback
 def handle_adm_delete_product_execute(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     prod_key = call.data.replace("adm_confirm_del_prod_", "")
     store = get_store_data()
@@ -3071,7 +3551,7 @@ def handle_adm_delete_product_execute(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_add_tier")
 @safe_callback
 def handle_adm_add_tier_select_product(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     store = get_store_data()
@@ -3093,7 +3573,7 @@ def handle_adm_add_tier_select_product(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_add_tier_") and c.data != "adm_add_tier")
 @safe_callback
 def handle_adm_add_tier_start(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     prod_key = call.data.replace("adm_add_tier_", "")
     store = get_store_data()
@@ -3116,7 +3596,7 @@ def handle_adm_add_tier_start(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_delete_tier")
 @safe_callback
 def handle_adm_delete_tier_select_product(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     store = get_store_data()
@@ -3139,7 +3619,7 @@ def handle_adm_delete_tier_select_product(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_tier_") and not c.data.startswith("adm_del_tier_conf_"))
 @safe_callback
 def handle_adm_delete_tier_select_tier(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     prod_key = call.data.replace("adm_del_tier_", "")
     store = get_store_data()
@@ -3170,7 +3650,7 @@ def handle_adm_delete_tier_select_tier(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_tier_conf_"))
 @safe_callback
 def handle_adm_delete_tier_confirm(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     parts = call.data.replace("adm_del_tier_conf_", "").split("_", 1)
     prod_key = parts[0]
@@ -3204,7 +3684,7 @@ def handle_adm_delete_tier_confirm(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_exec_del_tier_"))
 @safe_callback
 def handle_adm_delete_tier_execute(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     parts = call.data.replace("adm_exec_del_tier_", "").split("_", 1)
     prod_key = parts[0]
@@ -3237,7 +3717,7 @@ def handle_adm_delete_tier_execute(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_view_waitlist")
 @safe_callback
 def handle_adm_view_waitlist(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     waitlist = get_waitlist()
@@ -3275,7 +3755,7 @@ def handle_adm_view_waitlist(call):
 @bot.callback_query_handler(func=lambda c: c.data == "adm_notify_waitlist")
 @safe_callback
 def handle_adm_notify_waitlist_prompt(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     bot.answer_callback_query(call.id)
     waitlist = get_waitlist()
@@ -3306,7 +3786,7 @@ def handle_adm_notify_waitlist_prompt(call):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm_notify_wl_"))
 @safe_callback
 def handle_adm_notify_waitlist_execute(call):
-    if call.from_user.id != ADMIN_ID:
+    if not is_admin(call.from_user.id):
         return
     wl_key = call.data.replace("adm_notify_wl_", "")
     waitlist = get_waitlist()
@@ -3358,6 +3838,149 @@ def handle_adm_notify_waitlist_execute(call):
         )
     )
 
+
+# ================= Multi-Admin Panel Handlers =================
+@bot.callback_query_handler(func=lambda c: c.data == "adm_manage_admins")
+@safe_callback
+def handle_adm_manage_admins(call):
+    if not is_admin(call.from_user.id):
+        return
+    bot.answer_callback_query(call.id)
+    admins = get_admins()
+
+    text = "👑 <b>إدارة المشرفين والمدراء (Multi-Admin System)</b>\n━━━━━━━━━━━━━━━━━━━\n\n"
+    text += "قائمة المشرفين الحاليين المصرح لهم بإدارة المتجر واستقبال الطلبات:\n\n"
+
+    idx = 1
+    owner_str = str(ADMIN_ID)
+    if owner_str in admins:
+        o = admins[owner_str]
+        text += f"{idx}. 👑 <b>{o.get('name', 'المدير العام')} (المالك الأساسي)</b>\n"
+        text += f"   🆔 ID: <code>{owner_str}</code>\n"
+        if o.get("username"):
+            text += f"   👤 المعرف: @{o['username']}\n"
+        text += "\n"
+        idx += 1
+
+    for uid, ainfo in admins.items():
+        if uid == owner_str:
+            continue
+        u_name = ainfo.get("name", "مشرف")
+        u_uname = f"@{ainfo['username']}" if ainfo.get("username") else "بدون معرف"
+        added_date = (ainfo.get("added_at") or "")[:10]
+        date_str = f" | تاريخ الإضافة: {added_date}" if added_date else ""
+        text += f"{idx}. 🛡 <b>{u_name}</b>\n"
+        text += f"   🆔 ID: <code>{uid}</code>\n"
+        text += f"   👤 المعرف: {u_uname}{date_str}\n\n"
+        idx += 1
+
+    text += "━━━━━━━━━━━━━━━━━━━\nاختر الإجراء المطلوب:"
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("➕ إضافة مشرف جديد", callback_data="adm_add_admin_prompt"),
+        types.InlineKeyboardButton("🗑️ حذف مشرف", callback_data="adm_del_admin_menu")
+    )
+    markup.add(types.InlineKeyboardButton("🔙 رجوع للوحة الإدارة", callback_data="adm_back_to_main"))
+    safe_edit_message_text(call, text, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_add_admin_prompt")
+@safe_callback
+def handle_adm_add_admin_prompt(call):
+    if not is_admin(call.from_user.id):
+        return
+    bot.answer_callback_query(call.id)
+    admin_action_states[call.from_user.id] = {"action": "add_admin_id"}
+    safe_edit_message_text(
+        call,
+        "➕ <b>إضافة مشرف جديد</b>\n\n"
+        "أرسل الآن <b>معرف المستخدم (Telegram Chat ID / User ID)</b> الخاص به (أرقام فقط، مثال: <code>123456789</code>):\n\n"
+        "💡 يمكن للمستخدم معرفة الـ ID الخاص به عبر الدخول للبوت والضغط على /start أو عبر بوت @userinfobot.\n\n"
+        "أو أرسل /cancel للإلغاء.",
+        reply_markup=types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع لقائمة المشرفين", callback_data="adm_manage_admins")
+        )
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data == "adm_del_admin_menu")
+@safe_callback
+def handle_adm_del_admin_menu(call):
+    if not is_admin(call.from_user.id):
+        return
+    bot.answer_callback_query(call.id)
+    admins = get_admins()
+    owner_str = str(ADMIN_ID)
+    other_admins = {k: v for k, v in admins.items() if k != owner_str}
+
+    if not other_admins:
+        markup = types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_manage_admins")
+        )
+        safe_edit_message_text(
+            call,
+            "ℹ️ <b>لا يوجد مشرفين إضافيين حالياً لحذفهم.</b>\n(يوجد فقط المالك الأساسي للنظام وهو محمي من الحذف).",
+            reply_markup=markup
+        )
+        return
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for uid, ainfo in other_admins.items():
+        name = ainfo.get("name", "مشرف")
+        markup.add(types.InlineKeyboardButton(
+            f"🗑️ {name} ({uid})",
+            callback_data=f"adm_del_adm_conf_{uid}"
+        ))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="adm_manage_admins"))
+    safe_edit_message_text(call, "🗑️ <b>اختر المشرف المراد حذفه من النظام:</b>", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_adm_conf_"))
+@safe_callback
+def handle_adm_del_admin_conf(call):
+    if not is_admin(call.from_user.id):
+        return
+    bot.answer_callback_query(call.id)
+    target_uid = call.data.replace("adm_del_adm_conf_", "")
+    admins = get_admins()
+    ainfo = admins.get(target_uid, {})
+    name = ainfo.get("name", "مشرف")
+
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ نعم، احذف المشرف", callback_data=f"adm_del_adm_exec_{target_uid}"),
+        types.InlineKeyboardButton("❌ إلغاء", callback_data="adm_manage_admins")
+    )
+    safe_edit_message_text(
+        call,
+        f"⚠️ <b>تأكيد حذف المشرف</b>\n\n"
+        f"هل أنت متأكد من حذف المشرف <b>{name}</b> (<code>{target_uid}</code>)؟\n"
+        f"سيتم سحب كافة صلاحيات لوحة التحكم منه وإيقاف وصول إشعارات الطلبات له فوراً.",
+        reply_markup=markup
+    )
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("adm_del_adm_exec_"))
+@safe_callback
+def handle_adm_del_admin_exec(call):
+    if not is_admin(call.from_user.id):
+        return
+    bot.answer_callback_query(call.id)
+    target_uid = call.data.replace("adm_del_adm_exec_", "")
+    success, msg_text = remove_existing_admin(target_uid)
+    markup = types.InlineKeyboardMarkup().add(
+        types.InlineKeyboardButton("🔙 رجوع لقائمة المشرفين", callback_data="adm_manage_admins")
+    )
+    if success:
+        safe_edit_message_text(
+            call,
+            f"✅ <b>تم حذف المشرف بنجاح!</b>\n🆔 المعرف: <code>{target_uid}</code>\nتم إلغاء صلاحياته الإدارية فوراً.",
+            reply_markup=markup
+        )
+    else:
+        safe_edit_message_text(
+            call,
+            f"❌ <b>تعذر الحذف:</b> {msg_text}",
+            reply_markup=markup
+        )
+
 # ================= Admin Text Input Router =================
 def handle_admin_text_inputs(message):
     admin_id = message.from_user.id
@@ -3407,6 +4030,49 @@ def handle_admin_text_inputs(message):
             pass
         return
 
+    if action == "add_admin_id":
+        admin_action_states.pop(admin_id, None)
+        clean_id = text.translate(str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")).strip()
+        if not clean_id.isdigit():
+            bot.reply_to(message, "⚠️ معرف المشرف يجب أن يتكون من أرقام فقط (Telegram ID).")
+            return
+
+        target_uid = int(clean_id)
+        cand_name = "مشرف جديد"
+        cand_username = ""
+        with database_connection() as conn:
+            row = conn.execute("SELECT customer_first_name, customer_username FROM payment_requests WHERE user_id = ? ORDER BY id DESC LIMIT 1", (target_uid,)).fetchone()
+            if row:
+                cand_name = row["customer_first_name"] or cand_name
+                cand_username = row["customer_username"] or cand_username
+
+        roles = get_user_roles()
+        if str(target_uid) in roles:
+            cand_name = roles[str(target_uid)].get("name") or cand_name
+            cand_username = roles[str(target_uid)].get("username") or cand_username
+
+        success, msg_text = add_new_admin(target_uid, name=cand_name, username=cand_username)
+        if success:
+            bot.reply_to(
+                message,
+                f"✅ <b>تمت إضافة المشرف بنجاح!</b>\n\n"
+                f"👤 الاسم: <b>{cand_name}</b>\n"
+                f"🆔 Chat ID: <code>{target_uid}</code>\n"
+                f"📱 المعرف: @{cand_username or 'بدون'}\n\n"
+                "👑 يمتلك الآن كافة صلاحيات لوحة التحكم واستقبال إشعارات وتأكيد طلبات الشراء."
+            )
+            try:
+                bot.send_message(
+                    target_uid,
+                    "🎉 <b>تم تعيينك كمشرف (Admin) في متجر GoPro Store!</b>\n\n"
+                    "يمكنك الآن استخدام أمر /admin أو زر لوحة الإدارة لإدارة المتجر واستقبال وإدارة طلبات الشراء فوراً."
+                )
+            except Exception:
+                pass
+        else:
+            bot.reply_to(message, f"⚠️ {msg_text}")
+        return
+
     if action == "update_price":
         prod_key = state["prod_key"]
         pkg_id = state["pkg_id"]
@@ -3419,15 +4085,26 @@ def handle_admin_text_inputs(message):
 
         store = get_store_data()
         prod = store.get(prod_key)
+        updated_pkg = None
         if prod:
             for pkg in prod.get("packages", []):
                 if pkg["id"] == pkg_id:
                     pkg[field] = clean_price
+                    updated_pkg = pkg
                     break
-            update_store_data(store)
+            if updated_pkg is not None:
+                update_store_data(store)
 
-        tier_names = {"retail_price": "سعر العميل", "reseller_price": "سعر التاجر", "friend_price": "سعر الصديق"}
-        bot.reply_to(message, f"✅ تم تحديث <b>{tier_names.get(field)}</b> بنجاح إلى: <b>{clean_price}</b>")
+        tier_names = {
+            "retail_price": "سعر العميل",
+            "reseller_price": "سعر التاجر",
+            "friend_price": "سعر الصديق",
+            "cashback": "كاش باك الباقة"
+        }
+        if updated_pkg is not None:
+            bot.reply_to(message, f"✅ تم تحديث <b>{tier_names.get(field, field)}</b> لباقة <b>{updated_pkg.get('label', pkg_id)}</b> بنجاح إلى: <b>{clean_price}</b>")
+        else:
+            bot.reply_to(message, f"❌ تعذر التحديث: لم يتم العثور على الباقة <code>{pkg_id}</code> ضمن منتج <code>{prod_key}</code>.")
         return
 
     if action == "edit_description":
@@ -3650,8 +4327,10 @@ def handle_admin_text_inputs(message):
             message,
             f"✅ اسم الباقة: <b>{text}</b>\n\n"
             "أرسل الآن الأسعار بالتنسيق التالي:\n"
-            "<code>سعر_العميل, سعر_التاجر, سعر_الصديق</code>\n\n"
-            "مثال: <code>300ج, 250ج, 220ج</code>\n\n"
+            "<code>سعر_العميل, سعر_التاجر, سعر_الصديق</code>\n"
+            "أو مع تحديد قيمة الكاش باك:\n"
+            "<code>سعر_العميل, سعر_التاجر, سعر_الصديق, كاش_باك</code>\n\n"
+            "مثال: <code>300ج, 250ج, 220ج, 20ج</code>\n\n"
             "أو أرسل /cancel للإلغاء:"
         )
         return
@@ -3661,12 +4340,13 @@ def handle_admin_text_inputs(message):
         tier_label = state.get("tier_label", "باقة جديدة")
         parts = [p.strip() for p in text.split(",")]
         if len(parts) < 3:
-            bot.reply_to(message, "⚠️ يرجى إرسال 3 أسعار مفصولين بفاصلة:\n<code>سعر_العميل, سعر_التاجر, سعر_الصديق</code>")
+            bot.reply_to(message, "⚠️ يرجى إرسال 3 أسعار على الأقل مفصولين بفاصلة:\n<code>سعر_العميل, سعر_التاجر, سعر_الصديق [, كاش_باك]</code>")
             return
 
         retail_price = parts[0].strip()
         reseller_price = parts[1].strip()
         friend_price = parts[2].strip()
+        cashback_val = parts[3].strip() if len(parts) >= 4 else "0ج"
 
         if not retail_price.endswith("ج"):
             retail_price += "ج"
@@ -3674,6 +4354,8 @@ def handle_admin_text_inputs(message):
             reseller_price += "ج"
         if not friend_price.endswith("ج"):
             friend_price += "ج"
+        if not cashback_val.endswith("ج"):
+            cashback_val += "ج"
 
         store = get_store_data()
         prod = store.get(prod_key)
@@ -3697,6 +4379,7 @@ def handle_admin_text_inputs(message):
             "retail_price": retail_price,
             "reseller_price": reseller_price,
             "friend_price": friend_price,
+            "cashback": cashback_val,
             "requires_email": False,
             "desc": "",
             "available": True
@@ -3716,7 +4399,8 @@ def handle_admin_text_inputs(message):
             f"🆔 المفتاح: <code>{tier_id}</code>\n"
             f"💰 سعر العميل: <b>{retail_price}</b>\n"
             f"💼 سعر التاجر: <b>{reseller_price}</b>\n"
-            f"🤝 سعر الصديق: <b>{friend_price}</b>\n\n"
+            f"🤝 سعر الصديق: <b>{friend_price}</b>\n"
+            f"🎁 كاش باك الباقة: <b>{cashback_val}</b>\n\n"
             f"📊 إجمالي باقات المنتج: <b>{len(prod['packages'])}</b>"
         )
         return
