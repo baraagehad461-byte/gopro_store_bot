@@ -39,6 +39,8 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "5152178321"))
 VODAFONE_CASH = os.getenv("VODAFONE_CASH", "01060348550")
 SUPPORT_WHATSAPP = "01220146907"
 SUPPORT_TELEGRAM = "@gopro_store_team"
+REQUIRED_GROUP = os.getenv("REQUIRED_GROUP", "@gopro_store_group")
+REQUIRED_GROUP_URL = os.getenv("REQUIRED_GROUP_URL", "https://t.me/gopro_store_group")
 
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
 
@@ -64,6 +66,14 @@ def safe_callback(func):
     """Decorator that ensures answer_callback_query is always called, preventing infinite spinning."""
     def wrapper(call):
         try:
+            user_id = call.from_user.id
+            if call.data != "check_join" and not is_admin(user_id) and not is_user_subscribed(user_id):
+                try:
+                    bot.answer_callback_query(call.id, "⚠️ يجب الاشتراك في جروب المتجر أولاً للاستمرار!", show_alert=True)
+                except Exception:
+                    pass
+                send_force_join_message(call.message.chat.id)
+                return
             func(call)
         except Exception as e:
             print(f"Error in callback handler {func.__name__}: {e}")
@@ -77,28 +87,57 @@ def safe_callback(func):
 
 def safe_edit_message_text(call, text, reply_markup=None):
     """
-    Safely edit a message text, handling:
+    Safely edit a message (text or photo caption), handling:
     - "message is not modified" errors (ignored silently)
-    - Photo→text transitions (delete old, send new)
+    - Photo messages (attempts edit_message_caption first, falls back to delete + send_message)
+    - Normal text messages (edit_message_text, falls back to delete + send_message)
     """
+    chat_id = call.message.chat.id
+    message_id = call.message.message_id
+
+    is_photo = bool(getattr(call.message, 'photo', None) or getattr(call.message, 'content_type', None) == 'photo')
+
+    if is_photo:
+        if len(text) <= 1024:
+            try:
+                bot.edit_message_caption(
+                    caption=text,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    reply_markup=reply_markup
+                )
+                return
+            except Exception as e:
+                error_str = str(e).lower()
+                if "message is not modified" in error_str:
+                    return
+        try:
+            bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+        try:
+            bot.send_message(chat_id, text, reply_markup=reply_markup)
+        except Exception as send_err:
+            print(f"Error sending fallback message: {send_err}")
+        return
+
     try:
         bot.edit_message_text(
             text,
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
+            chat_id=chat_id,
+            message_id=message_id,
             reply_markup=reply_markup
         )
     except Exception as e:
         error_str = str(e).lower()
         if "message is not modified" in error_str:
-            return  # Content unchanged, ignore silently
-        # Photo→text transition or other edit failure: delete old message, send new
+            return
         try:
-            bot.delete_message(call.message.chat.id, call.message.message_id)
+            bot.delete_message(chat_id, message_id)
         except Exception:
             pass
         try:
-            bot.send_message(call.message.chat.id, text, reply_markup=reply_markup)
+            bot.send_message(chat_id, text, reply_markup=reply_markup)
         except Exception as send_err:
             print(f"Error sending fallback message: {send_err}")
 
@@ -407,6 +446,40 @@ def remove_existing_admin(user_id):
     update_admins(admins)
     return True, "تم حذف المشرف بنجاح."
 
+# ================= Mandatory Channel / Group Subscription =================
+def is_user_subscribed(user_id):
+    if is_admin(user_id):
+        return True
+    try:
+        member = bot.get_chat_member(REQUIRED_GROUP, user_id)
+        if member.status in ("member", "administrator", "creator", "restricted"):
+            return True
+        return False
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "user not found" in err_msg or "user_not_participant" in err_msg or "participant" in err_msg:
+            return False
+        # Fail open if bot is not in group or group is inaccessible to avoid locking everyone out
+        print(f"Warning in is_user_subscribed for user {user_id}: {e}")
+        return True
+
+def get_force_join_markup():
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("📢 انضم إلى الجروب الرسمي", url=REQUIRED_GROUP_URL),
+        types.InlineKeyboardButton("🔄 تحقق من الانضمام", callback_data="check_join")
+    )
+    return markup
+
+def send_force_join_message(chat_id):
+    text = (
+        "⚠️ <b>تنبيه: يجب الانضمام إلى جروب المتجر أولاً!</b>\n\n"
+        "للاستفادة من خدمات البوت وتصفح العروض والمنتجات والشراء، يرجى الانضمام إلى جروبنا الرسمي على تليجرام:\n"
+        f"🔗 <a href=\"{REQUIRED_GROUP_URL}\">اضغط هنا للانضمام إلى الجروب</a>\n\n"
+        "بعد الانضمام، اضغط على زر <b>🔄 تحقق من الانضمام</b> أدناه 👇"
+    )
+    bot.send_message(chat_id, text, reply_markup=get_force_join_markup(), disable_web_page_preview=True)
+
 # ================= Wallet & Cashback Helpers =================
 def get_user_wallet_balance(user_id):
     """إجمالي الرصيد الفعلي المخزن في محفظة المستخدم"""
@@ -616,15 +689,13 @@ def get_main_menu_keyboard(user_id):
 
 def build_products_inline_menu(user_id):
     store = get_store_data()
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    buttons = []
+    markup = types.InlineKeyboardMarkup(row_width=1)
     for prod_key, prod in store.items():
-        if not prod.get("available", True):
-            btn_text = f"❌ {prod['name']} (غير متوفر)"
-        else:
-            btn_text = prod['name']
-        buttons.append(types.InlineKeyboardButton(btn_text, callback_data=f"prod_{prod_key}"))
-    markup.add(*buttons)
+        is_avail = prod.get("available", True)
+        circle = "🟢" if is_avail else "🔴"
+        status_text = "" if is_avail else " (غير متوفر)"
+        btn_text = f"{circle} {prod['name']}{status_text}"
+        markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"prod_{prod_key}"))
     return markup
 
 def build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=None):
@@ -639,7 +710,7 @@ def build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=
     if subcategories and not selected_subcat:
         for subcat in subcategories:
             markup.add(types.InlineKeyboardButton(
-                subcat["name"],
+                f"📂 {subcat['name']}",
                 callback_data=f"subcat_{prod_key}_{subcat['id']}"
             ))
         markup.add(types.InlineKeyboardButton("🔙 رجوع لقائمة المنتجات", callback_data="back_to_products"))
@@ -650,23 +721,19 @@ def build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=
         packages = [p for p in packages if p.get("subcategory") == selected_subcat]
 
     for pkg in packages:
-        if not pkg.get("available", True):
-            label = pkg["label"]
-            if prod_key == "chatgpt" and pkg["id"] == "biz_remaining":
-                days, end_date = get_chatgpt_business_info()
-                label = f"الأيام المتبقية ({days} يوم حتى {end_date})"
-            markup.add(types.InlineKeyboardButton(
-                f"🔴 {label} (غير متوفر حالياً)",
-                callback_data=f"pkg_unavailable_{prod_key}_{pkg['id']}"
-            ))
-            continue
-        price_info = get_package_price_for_user(pkg, user_id)
         label = pkg["label"]
         if prod_key == "chatgpt" and pkg["id"] == "biz_remaining":
             days, end_date = get_chatgpt_business_info()
             label = f"الأيام المتبقية ({days} يوم حتى {end_date})"
-        
-        btn_text = f"{label} — {price_info['unit_price']}"
+
+        if not pkg.get("available", True):
+            markup.add(types.InlineKeyboardButton(
+                f"🔴 {label} (غير متوفر)",
+                callback_data=f"pkg_unavailable_{prod_key}_{pkg['id']}"
+            ))
+            continue
+        price_info = get_package_price_for_user(pkg, user_id)
+        btn_text = f"🟢 {label} — {price_info['unit_price']}"
         markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"pkg_{prod_key}_{pkg['id']}"))
 
     if selected_subcat:
@@ -812,6 +879,9 @@ def start_new_order(user_id, prod_key, pkg_id):
 @bot.message_handler(commands=["start"])
 def handle_start(message):
     user_id = message.from_user.id
+    if not is_admin(user_id) and not is_user_subscribed(user_id):
+        send_force_join_message(message.chat.id)
+        return
     name = message.from_user.first_name or "عزيزنا العميل"
     role = get_user_role(user_id)
     
@@ -839,6 +909,9 @@ def handle_start(message):
 @bot.message_handler(func=lambda msg: msg.text == "🛍 تصفح المنتجات")
 def handle_browse_products(message):
     user_id = message.from_user.id
+    if not is_admin(user_id) and not is_user_subscribed(user_id):
+        send_force_join_message(message.chat.id)
+        return
     role = get_user_role(user_id)
     
     role_header = ""
@@ -860,6 +933,10 @@ def handle_browse_products(message):
 
 @bot.message_handler(func=lambda msg: msg.text == "💬 الدعم الفني")
 def handle_support(message):
+    user_id = message.from_user.id
+    if not is_admin(user_id) and not is_user_subscribed(user_id):
+        send_force_join_message(message.chat.id)
+        return
     try:
         support_text = (
             "🛠 <b>مركز المساعدة والدعم الفني | GoPro Store Team</b>\n\n"
@@ -949,6 +1026,9 @@ def format_wallet_display(user_id, user_first_name="عزيزنا العميل"):
 @bot.message_handler(func=lambda msg: msg.text in ("💰 محفظتي", "/wallet", "محفظتي"))
 def handle_my_wallet(message):
     user_id = message.from_user.id
+    if not is_admin(user_id) and not is_user_subscribed(user_id):
+        send_force_join_message(message.chat.id)
+        return
     name = message.from_user.first_name or "العميل"
     text, markup = format_wallet_display(user_id, name)
     bot.send_message(message.chat.id, text, reply_markup=markup)
@@ -965,6 +1045,9 @@ def handle_refresh_wallet(call):
 @bot.message_handler(func=lambda msg: msg.text == "📦 سجل مشترياتي")
 def handle_my_orders(message):
     user_id = message.from_user.id
+    if not is_admin(user_id) and not is_user_subscribed(user_id):
+        send_force_join_message(message.chat.id)
+        return
     with database_connection() as conn:
         orders = conn.execute("""
             SELECT * FROM payment_requests
@@ -999,6 +1082,36 @@ def handle_my_orders(message):
             "---------------------------\n"
         )
     bot.send_message(message.chat.id, text)
+
+
+# ================= Callback Query: Check Group Subscription =================
+@bot.callback_query_handler(func=lambda c: c.data == "check_join")
+def handle_check_join_callback(call):
+    user_id = call.from_user.id
+    if is_user_subscribed(user_id):
+        bot.answer_callback_query(call.id, "✅ تم التحقق من اشتراكك بنجاح! أهلاً بك في المتجر.", show_alert=True)
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        role = get_user_role(user_id)
+        role_note = ""
+        if role == "reseller":
+            role_note = "💼 <b>حساب تاجر معتمد</b> (تُطبق لك أسعار خاصة بالتجار والمسوقين)\n\n"
+        elif role == "friend":
+            role_note = "🤝 <b>حساب صديق</b> (تُطبق لك أسعار خاصة بالأصدقاء)\n\n"
+        elif role == "admin":
+            role_note = "👑 <b>حساب المدير العام</b>\n\n"
+        name = call.from_user.first_name or "عزيزنا العميل"
+        welcome_text = (
+            f"👋 أهلاً بك يا <b>{name}</b> في متجر الاشتراكات والذكاء الاصطناعي 🚀\n\n"
+            + role_note +
+            "✨ نوفر لك أفضل اشتراكات الذكاء الاصطناعي، التصميم، والمونتاج بأسعار منافسة وتسليم رسمي سريع ومضمون.\n\n"
+            "اختر ما تريد من القائمة بالأسفل:"
+        )
+        bot.send_message(call.message.chat.id, welcome_text, reply_markup=get_main_menu_keyboard(user_id))
+    else:
+        bot.answer_callback_query(call.id, "❌ لم يتم العثور على اشتراكك في الجروب بعد! يرجى الانضمام أولاً ثم إعادة المحاولة.", show_alert=True)
 
 # ================= Inline Callbacks: Product & Package Browsing =================
 @bot.callback_query_handler(func=lambda c: c.data == "back_to_products")
@@ -1050,7 +1163,7 @@ def handle_product_click(call):
                 except Exception as photo_err:
                     print(f"Error sending product photo for {prod_key}: {photo_err}")
                     traceback.print_exc()
-            bot.edit_message_text(desc, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
+            safe_edit_message_text(call, desc, reply_markup=markup)
             bot.answer_callback_query(call.id)
             return
 
@@ -1070,7 +1183,7 @@ def handle_product_click(call):
             except Exception as photo_err:
                 print(f"Error sending product photo for {prod_key}: {photo_err}")
                 traceback.print_exc()
-        bot.edit_message_text(desc, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
+        safe_edit_message_text(call, desc, reply_markup=markup)
         bot.answer_callback_query(call.id)
     except Exception as e:
         print(f"Critical error in handle_product_click: {e}")
@@ -1103,7 +1216,7 @@ def handle_subcategory_click(call):
 
         text = f"<b>{prod['name']}</b> — <b>{subcat_name}</b>\n\n{subcat_desc}\n\n👇 اختر الباقة المطلوبة:"
         markup = build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=subcat_id)
-        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
+        safe_edit_message_text(call, text, reply_markup=markup)
         bot.answer_callback_query(call.id)
     except Exception as e:
         print(f"Error in handle_subcategory_click: {e}")
@@ -1170,7 +1283,7 @@ def handle_package_view(call):
                 print(f"Error sending package photo for {prod_key}/{pkg_id}: {photo_err}")
                 traceback.print_exc()
 
-        bot.edit_message_text(caption, chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=markup)
+        safe_edit_message_text(call, caption, reply_markup=markup)
         bot.answer_callback_query(call.id)
     except Exception as e:
         print(f"Critical error in handle_package_view: {e}")
@@ -1841,8 +1954,8 @@ def notify_admins_new_order(request_id):
         f"🔢 <b>الكمية:</b> {row['quantity']}\n"
         f"💵 <b>سعر القطعة:</b> {row['unit_price']}\n"
         + (f"🎟 <b>الكوبون:</b> {row['coupon_code']} (خصم: {row['discount_amount']})\n" if row['coupon_code'] else "")
-        + (f"🪙 <b>خصم المحفظة (معلق):</b> {format_currency(Decimal(str(row['wallet_used']))}\n" if row['wallet_used'] and float(row['wallet_used']) > 0 else "")
-        + (f"🎁 <b>كاش باك مؤهل عند القبول:</b> {format_currency(Decimal(str(row['cashback_earned']))}\n" if row['cashback_earned'] and float(row['cashback_earned']) > 0 else "")
+        + (f"🪙 <b>خصم المحفظة (معلق):</b> {format_currency(Decimal(str(row['wallet_used'])))}\n" if row['wallet_used'] and float(row['wallet_used']) > 0 else "")
+        + (f"🎁 <b>كاش باك مؤهل عند القبول:</b> {format_currency(Decimal(str(row['cashback_earned'])))}\n" if row['cashback_earned'] and float(row['cashback_earned']) > 0 else "")
         + f"💰 <b>الإجمالي المطلوب تحويله:</b> <b>{row['total_amount']}</b>\n"
         f"📱 <b>رقم المحول منه:</b> <code>{row['phone_number']}</code>\n"
         + (f"📧 <b>إيميل التفعيل:</b> <code>{row['customer_email']}</code>\n" if row['customer_email'] else "") +
