@@ -586,9 +586,13 @@ def get_user_wallet_transactions(user_id, limit=10):
         """, (user_id, limit)).fetchall()
         return rows
 
-def get_package_cashback(package):
+def get_package_cashback(package, user_id=None):
     if not package:
         return Decimal("0.0")
+    if user_id:
+        role = get_user_role(user_id)
+        if role != "customer":
+            return Decimal("0.0")
     val = package.get("cashback") or package.get("cashback_amount") or "0"
     amt = parse_price_amount(str(val))
     return amt or Decimal("0.0")
@@ -736,9 +740,10 @@ def build_products_inline_menu(user_id):
     markup = types.InlineKeyboardMarkup(row_width=1)
     for prod_key, prod in store.items():
         is_avail = prod.get("available", True)
-        circle = "🟢" if is_avail else "🔴"
-        status_text = "" if is_avail else " (غير متوفر)"
-        btn_text = f"{circle} {prod['name']}{status_text}"
+        if is_avail:
+            btn_text = f"🟢 {prod['name']}"
+        else:
+            btn_text = f"🔴 {prod['name']} | (غير متوفر)"
         markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"prod_{prod_key}"))
     return markup
 
@@ -772,12 +777,12 @@ def build_subcategories_or_packages_keyboard(prod_key, user_id, selected_subcat=
 
         if not pkg.get("available", True):
             markup.add(types.InlineKeyboardButton(
-                f"🔴 {label} (غير متوفر)",
+                f"🔴 {label} | (غير متوفر)",
                 callback_data=f"pkg_unavailable_{prod_key}_{pkg['id']}"
             ))
             continue
         price_info = get_package_price_for_user(pkg, user_id)
-        btn_text = f"🟢 {label} — {price_info['unit_price']}"
+        btn_text = f"🟢 {label} | {price_info['unit_price']}"
         markup.add(types.InlineKeyboardButton(btn_text, callback_data=f"pkg_{prod_key}_{pkg['id']}"))
 
     if selected_subcat:
@@ -864,18 +869,18 @@ def clear_db_user_state(user_id):
     user_states.pop(user_id, None)
 
 def start_new_order(user_id, prod_key, pkg_id):
-    store = get_store_data()
+    store = get_store_data() or {}
     prod = store.get(prod_key)
-    if not prod:
+    if not prod or not prod.get("available", True):
         return None
     pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
-    if not pkg:
+    if not pkg or not pkg.get("available", True):
         return None
 
     role = get_user_role(user_id)
     price_info = get_package_price_for_user(pkg, user_id)
     order_ref = generate_order_ref()
-    cb_unit = float(get_package_cashback(pkg))
+    cb_unit = float(get_package_cashback(pkg, user_id=user_id)) if role == "customer" else 0.0
 
     with database_connection() as conn:
         # Cancel any previous active order in creation step
@@ -1257,7 +1262,7 @@ def handle_product_click(call):
             return
 
         if not prod.get("available", True):
-            bot.answer_callback_query(call.id, "⚠️ نعتذر، هذا المنتج غير متوفر حالياً.", show_alert=True)
+            bot.answer_callback_query(call.id, "⚠️ عذراً، هذا المنتج غير متوفر حالياً!", show_alert=True)
             return
 
         # Check if product has subcategories (like ChatGPT)
@@ -1376,8 +1381,9 @@ def handle_package_view(call):
 
         email_notice = "\n📧 <i>تنويه: هذه الباقة تتطلب إدخال بريدك الإلكتروني للتفعيل المباشر.</i>" if pkg.get("requires_email") else ""
 
-        cashback_amt = get_package_cashback(pkg)
-        cashback_notice = f"\n🎁 <b>كاش باك فوري:</b> {format_currency(cashback_amt)} يُضاف لمحفظتك بعد تأكيد الطلب!\n" if cashback_amt > Decimal("0") else ""
+        role = get_user_role(user_id)
+        cashback_amt = get_package_cashback(pkg, user_id=user_id) if role == "customer" else Decimal("0")
+        cashback_notice = f"\n🎁 <b>كاش باك فوري:</b> {format_currency(cashback_amt)} يُضاف لمحفظتك بعد تأكيد الطلب!\n" if (cashback_amt > Decimal("0") and role == "customer") else ""
 
         pkg_desc = pkg.get("desc") or pkg.get("description") or ""
 
@@ -1423,7 +1429,20 @@ def handle_package_view(call):
 @safe_callback
 def handle_buy_click(call):
     user_id = call.from_user.id
-    _, prod_key, pkg_id = call.data.split("_", 2)
+    parts = call.data.split("_", 2)
+    if len(parts) < 3:
+        bot.answer_callback_query(call.id, "خطأ في بيانات الطلب.", show_alert=True)
+        return
+    _, prod_key, pkg_id = parts
+    store = get_store_data() or {}
+    prod = store.get(prod_key)
+    if not prod or not prod.get("available", True):
+        bot.answer_callback_query(call.id, "⚠️ عذراً، هذا المنتج غير متوفر حالياً!", show_alert=True)
+        return
+    pkg = next((p for p in prod.get("packages", []) if p["id"] == pkg_id), None)
+    if not pkg or not pkg.get("available", True):
+        bot.answer_callback_query(call.id, "⚠️ عذراً، هذه الباقة غير متوفرة حالياً!", show_alert=True)
+        return
     state = start_new_order(user_id, prod_key, pkg_id)
     if not state:
         bot.answer_callback_query(call.id, "تعذر بدء الطلب، يرجى المحاولة لاحقاً.", show_alert=True)
@@ -1482,6 +1501,15 @@ def proceed_with_quantity(user_id, state, quantity, chat_id, message_id=None):
     total = unit_amt * Decimal(str(quantity))
     state["quantity"] = quantity
     state["total_amount"] = float(total)
+    user_role = get_user_role(user_id)
+
+    # Exclude reseller and friend from coupon flow (they already have special discounted tier pricing)
+    if user_role in ("reseller", "friend"):
+        state["step"] = "awaiting_wallet"
+        save_db_user_state(user_id, state)
+        proceed_to_payment_or_wallet(user_id, state, chat_id, message_id)
+        return
+
     state["step"] = "awaiting_coupon"
     save_db_user_state(user_id, state)
 
@@ -1502,10 +1530,16 @@ def proceed_with_quantity(user_id, state, quantity, chat_id, message_id=None):
 @safe_callback
 def handle_use_coupon_click(call):
     user_id = call.from_user.id
+    user_role = get_user_role(user_id)
     request_id = int(call.data.replace("use_coupon_", ""))
     state = user_states.get(user_id)
     if not state or state.get("request_id") != request_id:
         bot.answer_callback_query(call.id, "انتهت الجلسة.")
+        return
+
+    if user_role in ("reseller", "friend"):
+        bot.answer_callback_query(call.id, "⚠️ عذراً، أكواد الخصم مخصصة للعملاء فقط (حسابك يتمتع بأسعار خاصة بالفعل)", show_alert=True)
+        proceed_to_payment_or_wallet(user_id, state, call.message.chat.id, call.message.message_id)
         return
 
     state["step"] = "awaiting_coupon_code"
@@ -1614,6 +1648,12 @@ def handle_wallet_skip(call):
     show_payment_instructions(user_id, state, call.message.chat.id)
 
 def apply_coupon_to_order(user_id, state, code, chat_id):
+    user_role = get_user_role(user_id)
+    if user_role in ("reseller", "friend"):
+        bot.send_message(chat_id, "⚠️ عذراً، أكواد الخصم مخصصة للعملاء فقط (حسابك يتمتع بأسعار خاصة بالفعل)")
+        proceed_to_payment_or_wallet(user_id, state, chat_id)
+        return
+
     coupons = get_coupons()
     code_upper = code.strip().upper()
     coupon = coupons.get(code_upper)
@@ -1954,9 +1994,10 @@ def finalize_order_submission(message, state, customer_email=None):
             })
             update_coupons(coupons)
 
+    user_role = get_user_role(user_id)
     wallet_used = state.get("wallet_used", 0.0)
-    cashback_unit = float(state.get("cashback_unit", 0))
-    cashback_earned = cashback_unit * state.get("quantity", 1)
+    cashback_unit = float(state.get("cashback_unit", 0)) if user_role == "customer" else 0.0
+    cashback_earned = (cashback_unit * state.get("quantity", 1)) if user_role == "customer" else 0.0
 
     # Save to SQLite
     with database_connection() as conn:
@@ -2121,7 +2162,8 @@ def notify_customer_status_change(order_row, new_status, reason=None):
         cashback_earned = Decimal(str(order_row["cashback_earned"] or 0))
         if wallet_used > Decimal("0"):
             wallet_notes += f"\n🪙 <b>خصم المحفظة المطبق:</b> -{format_currency(wallet_used)}"
-        if cashback_earned > Decimal("0"):
+        user_role = order_row["user_role"] if "user_role" in order_row.keys() else get_user_role(user_id)
+        if cashback_earned > Decimal("0") and user_role == "customer":
             wallet_notes += f"\n🎁 <b>كاش باك مكتسب:</b> +{format_currency(cashback_earned)} (تم إيداعه في محفظتك!)"
         current_wallet_bal = get_user_wallet_balance(user_id)
         wallet_notes += f"\n💰 <b>رصيد محفظتك الحالي:</b> <b>{format_currency(current_wallet_bal)}</b>"
@@ -2282,7 +2324,8 @@ def handle_admin_accept(call):
             order_ref=order_ref
         )
 
-    if cashback_earned > Decimal("0"):
+    user_role = row["user_role"] if "user_role" in row.keys() else get_user_role(user_id)
+    if cashback_earned > Decimal("0") and user_role == "customer":
         add_wallet_transaction(
             user_id,
             "cashback_earned",
